@@ -1,0 +1,19 @@
+{
+    "id": 4,
+    "type": "Voxel",
+    "displayName": "Grass",
+    "folder": "grass",
+    "textures": [
+        {
+            "up": "top.png",
+            "down": "bottom.png",
+            "north": "side.png",
+            "south": "side.png",
+            "east": "side.png",
+            "west": "side.png"
+        }
+    ],
+    "animationSpeed": 0.5,
+    "isTransparent": false,
+    "sound": "grass"
+}

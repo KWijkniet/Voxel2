@@ -1,0 +1,19 @@
+{
+    "id": 1,
+    "type": "Voxel",
+    "displayName": "Stone",
+    "folder": "stone",
+    "textures": [
+        {
+            "up": "texture.png",
+            "down": "texture.png",
+            "north": "texture.png",
+            "south": "texture.png",
+            "east": "texture.png",
+            "west": "texture.png"
+        }
+    ],
+    "animationSpeed": 1,
+    "isTransparent": false,
+    "sound": "stone"
+}

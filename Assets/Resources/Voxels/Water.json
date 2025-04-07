@@ -1,0 +1,52 @@
+{
+    "id": 3,
+    "type": "Voxel",
+    "displayName": "Water",
+    "folder": "water",
+    "textures": [
+        {
+            "up": "0.png",
+            "down": "side.png",
+            "north": "side.png",
+            "south": "side.png",
+            "east": "side.png",
+            "west": "side.png"
+        },
+        {
+            "up": "1.png",
+            "down": "side.png",
+            "north": "side.png",
+            "south": "side.png",
+            "east": "side.png",
+            "west": "side.png"
+        },
+        {
+            "up": "2.png",
+            "down": "side.png",
+            "north": "side.png",
+            "south": "side.png",
+            "east": "side.png",
+            "west": "side.png"
+        },
+        {
+            "up": "3.png",
+            "down": "side.png",
+            "north": "side.png",
+            "south": "side.png",
+            "east": "side.png",
+            "west": "side.png"
+        },
+        {
+            "up": "4.png",
+            "down": "side.png",
+            "north": "side.png",
+            "south": "side.png",
+            "east": "side.png",
+            "west": "side.png"
+        }
+    ],
+    "animationSpeed": 1,
+    "isTransparent": true,
+    "isLiquid": true,
+    "sound": "water"
+}
