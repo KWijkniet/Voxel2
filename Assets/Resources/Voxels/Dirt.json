@@ -13,6 +13,7 @@
             "west": "texture.png"
         }
     ],
+    "canGreedyMesh": true,
     "animationSpeed": 1,
     "isTransparent": false,
     "sound": "dirt"

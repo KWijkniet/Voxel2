@@ -3,7 +3,7 @@
 
 //REMOVE IF BROKEN
 // Ensure proper alignment for GPU buffer
-#pragma pack_matrix(4)
+// #pragma pack_matrix(4)
 
 struct CBVoxel
 {
@@ -15,9 +15,7 @@ struct CBVoxel
 
 StructuredBuffer<CBVoxel> _VoxelBuffer;
 
-void GetVoxelTexture_float(
-    float3 voxelID_direction_animKey, // Pack parameters into a float3
-    out float index)
+void GetVoxelTexture_float(float3 voxelID_direction_animKey, out float index)
 {
     uint voxelID = (uint)voxelID_direction_animKey.x;
     uint direction = min((uint)voxelID_direction_animKey.y, 5);
@@ -46,16 +44,14 @@ void GetVoxelTexture_float(
     index = _VoxelBuffer[voxelID].directions[arrayIndex];
 }
 
-void GetAnimationSpeed_float(
-    float1 voxelID,
-    out float animationSpeed)
+void GetAnimationSpeed_float(float1 voxelID, float1 time, out float animationSpeed)
 {
-    animationSpeed = _VoxelBuffer[(uint)voxelID].animationSpeed;
+    float multiplier = _VoxelBuffer[(uint)voxelID].animationSpeed;
+    // animationSpeed = floor(time * multiplier + 0.0001);
+    animationSpeed = time;
 }
 
-void IsLiquid_float(
-    float1 voxelID,
-    out bool isLiquid)
+void IsLiquid_float(float1 voxelID, out bool isLiquid)
 {
     isLiquid = _VoxelBuffer[(uint)voxelID].isLiquid == 1;
 }

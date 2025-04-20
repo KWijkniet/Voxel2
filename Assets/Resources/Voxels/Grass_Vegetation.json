@@ -1,8 +1,8 @@
 {
-    "id": 1,
-    "type": "Voxel",
-    "displayName": "Stone",
-    "folder": "stone",
+    "id": 5,
+    "type": "Quad",
+    "displayName": "Grass",
+    "folder": "grass",
     "textures": [
         {
             "up": "texture.png",
@@ -13,8 +13,7 @@
             "west": "texture.png"
         }
     ],
-    "canGreedyMesh": true,
-    "animationSpeed": 1,
-    "isTransparent": false,
-    "sound": "stone"
+    "canGreedyMesh": false,
+    "isTransparent": true,
+    "sound": "grass"
 }

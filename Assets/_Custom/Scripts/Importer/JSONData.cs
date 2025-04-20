@@ -14,6 +14,7 @@ namespace Custom.Importer
         public float animationSpeed;
         public bool isLiquid;
         public bool isTransparent;
+        public bool canGreedyMesh;
         public string sound;
 
         public int GetId(){

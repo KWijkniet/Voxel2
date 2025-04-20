@@ -1,6 +1,6 @@
 {
     "id": 3,
-    "type": "Voxel",
+    "type": "Liquid",
     "displayName": "Water",
     "folder": "water",
     "textures": [
@@ -45,6 +45,7 @@
             "west": "side.png"
         }
     ],
+    "canGreedyMesh": true,
     "animationSpeed": 1,
     "isTransparent": true,
     "isLiquid": true,

@@ -24,7 +24,6 @@ public class ChunkCalculator : MonoBehaviour
 
     private void Update()
     {
-        Debug.Log("Update");
         if(greedyMesh != null)
         {
             Graphics.RenderMesh(renderParams[0], greedyMesh, 0, Matrix4x4.identity);
@@ -38,6 +37,7 @@ public class ChunkCalculator : MonoBehaviour
 
     public void Generate()
     {
+        Clear();
         if (database == null || database.VoxelCount() == 0 || (!useRandomVoxels && voxelIndex >= database.VoxelCount()))
         {
             Debug.LogError("Invalid database or voxel index");
@@ -45,11 +45,26 @@ public class ChunkCalculator : MonoBehaviour
         }
 
         voxels = new byte[size*size*size];
-        for (int i = 0; i < voxels.Length; i++)
+        int index = 0;
+        for (int z = 0; z < size; z++)
         {
-            int y = (i / size) % size;
-            voxels[i] = (byte)(y < maxY ? Random.Range(0f, 1f) > percentage ? useRandomVoxels ? Random.Range(0f, 1f) * (database.VoxelCount() - 1) + 1 : voxelIndex : 0 : 0);
+            for (int y = 0; y < size; y++)
+            {
+                for (int x = 0; x < size; x++)
+                {
+                    voxels[index] = (byte)(useRandomVoxels ? Random.Range(0f, 1f) * (database.VoxelCount() - 1) + 1 : voxelIndex);
+                    // voxels[index] = (byte)(y < maxY ? Random.Range(0f, 1f) > percentage ? useRandomVoxels ? Random.Range(0f, 1f) * (database.VoxelCount() - 1) + 1 : voxelIndex : 0 : 0);
+                    if(x > 1) voxels[index] = 0;
+                    index++;
+                }
+            }
         }
+
+        // for (int i = 0; i < voxels.Length; i++)
+        // {
+        //     int y = (i / size) % size;
+        //     voxels[i] = (byte)(y < maxY ? Random.Range(0f, 1f) > percentage ? useRandomVoxels ? Random.Range(0f, 1f) * (database.VoxelCount() - 1) + 1 : voxelIndex : 0 : 0);
+        // }
 
         GreedyMesher gm = new GreedyMesher(database, voxels, size, size, size);
         if (greedyMesh != null) greedyMesh.Clear();

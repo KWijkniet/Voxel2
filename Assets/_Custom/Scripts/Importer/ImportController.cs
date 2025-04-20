@@ -59,11 +59,6 @@ namespace Custom.Importer
             }
             voxels = voxels.OrderBy(voxel => voxel.id).ToList();
             ImportInternalTextures();
-
-            foreach (JSONData voxel in voxels)
-            {
-                Debug.Log(voxel.type + " " + voxel.displayName);
-            }
         }
 
         private void ImportInternalTextures()
@@ -111,6 +106,7 @@ namespace Custom.Importer
         private void GenerateTexture2DArray()
         {
             texture2DArray = new Texture2DArray(textures[0].texture.width, textures[0].texture.height, textures.Count, TextureFormat.ARGB32, false);
+            texture2DArray.wrapMode = TextureWrapMode.Clamp;
             texture2DArray.filterMode = FilterMode.Point;
 
             for (int i = 0; i < textures.Count; i++)
@@ -140,14 +136,14 @@ namespace Custom.Importer
             
             // Save to file using Unity's asset serialization
             #if UNITY_EDITOR
-            // Create a new asset file
-            string relativePath = "Assets/SaveImages/TextureArray.asset";
-            UnityEditor.AssetDatabase.CreateAsset(texture2DArray, relativePath);
-            UnityEditor.AssetDatabase.SaveAssets();
-            UnityEditor.AssetDatabase.Refresh();
-            Debug.Log("Texture2DArray saved to: " + relativePath);
+                // Create a new asset file
+                string relativePath = "Assets/SaveImages/TextureArray.asset";
+                UnityEditor.AssetDatabase.CreateAsset(texture2DArray, relativePath);
+                UnityEditor.AssetDatabase.SaveAssets();
+                UnityEditor.AssetDatabase.Refresh();
+                Debug.Log("Texture2DArray saved to: " + relativePath);
             #else
-            Debug.LogWarning("Texture2DArray can only be saved in the Unity Editor");
+                Debug.LogWarning("Texture2DArray can only be saved in the Unity Editor");
             #endif
         }
     
@@ -176,14 +172,6 @@ namespace Custom.Importer
                                 dirPtr[baseIndex + 3] = voxel.textures[frame].south.index;
                                 dirPtr[baseIndex + 4] = voxel.textures[frame].east.index;
                                 dirPtr[baseIndex + 5] = voxel.textures[frame].west.index;
-
-                                // Debug output for first voxel
-                                if (i == 4)
-                                {
-                                    Debug.Log($"Voxel 4, Frame {frame} - Up: {dirPtr[baseIndex + 0]}, Down: {dirPtr[baseIndex + 1]}, " +
-                                    $"North: {dirPtr[baseIndex + 2]}, South: {dirPtr[baseIndex + 3]}, " +
-                                    $"East: {dirPtr[baseIndex + 4]}, West: {dirPtr[baseIndex + 5]}");
-                                }
                             }
                         }
                     }
@@ -198,17 +186,6 @@ namespace Custom.Importer
             // Debug: Verify buffer data
             CBVoxel[] verifyData = new CBVoxel[voxels.Count];
             voxelBuffer.GetData(verifyData);
-            unsafe
-            {
-                fixed (int* dirPtr = verifyData[4].directions)
-                {
-                    Debug.Log($"Verify Voxel 4 - FrameCount: {verifyData[4].frameCount}");
-                    for (int i = 0; i < 6; i++)
-                    {
-                        Debug.Log($"Direction {i}: {dirPtr[i]}");
-                    }
-                }
-            }
         }
     }
 

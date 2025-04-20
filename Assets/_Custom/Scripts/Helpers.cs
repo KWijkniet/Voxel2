@@ -4,7 +4,7 @@ public class Helpers
 {
     public static int CoordinatesToIndex(int x, int y, int z, int size = 16) {
          if (x < 0 || x >= size || y < 0 || y >= size || z < 0 || z >= size)
-            return 0;
+            return -1;
         return x + y * size + z * size * size;
     }
 

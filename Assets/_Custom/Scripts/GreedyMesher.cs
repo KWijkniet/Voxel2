@@ -43,331 +43,19 @@ public class GreedyMesher
     public Mesh GenerateMesh()
     {
         meshData.Clear();
-        bool[] visited;
-
-        // Front
-        visited = new bool[width * height * depth];
-        for (int x = 0; x < width; x++)
-        {
-            for (int y = 0; y < height; y++)
-            {
-                for (int z = 0; z < depth; z++)
-                {
-                    byte voxelType = GetVoxel(x, y, z);
-                    JSONData voxelData = database.GetVoxelData(voxelType);
-                    bool isTransparent = voxelType > 0 && voxelData.isTransparent;
-                    
-                    if (voxelData.type != "Voxel" || visited[Helpers.CoordinatesToIndex(x, y, z, width)] || GetVoxel(x, y, z) == 0 || (GetVoxel(x, y, z + 1) != 0 && database.GetVoxelData(GetVoxel(x, y, z + 1)).isTransparent == isTransparent)) continue;
-                    visited[Helpers.CoordinatesToIndex(x, y, z, width)] = true;
-
-                    int currWidth = 1;
-                    int currHeight = 1;
-
-                    while (x + currWidth < width && GetVoxel(x + currWidth, y, z) != 0 && !visited[Helpers.CoordinatesToIndex(x + currWidth, y, z, width)] && GetVoxel(x + currWidth, y, z + 1) == 0 && GetVoxel(x + currWidth, y, z) == voxelType && database.GetVoxelData(GetVoxel(x + currWidth, y, z)).isTransparent == isTransparent)
-                    {
-                        visited[Helpers.CoordinatesToIndex(x + currWidth, y, z, width)] = true;
-                        currWidth++;
-                    }
-
-                    for (int ry = y + 1; ry < height; ry++)
-                    {
-                        bool rowGood = true;
-                        for (int rx = x; rx < x + currWidth; rx++)
-                        {
-                            if (GetVoxel(rx, ry, z) == 0 || visited[Helpers.CoordinatesToIndex(rx, ry, z, width)] || GetVoxel(rx, ry, z + 1) != 0 || GetVoxel(rx, ry, z) != voxelType || database.GetVoxelData(GetVoxel(rx, ry, z)).isTransparent != isTransparent)
-                            {
-                                rowGood = false;
-                                break;
-                            }
-                        }
-
-                        if (rowGood)
-                        {
-                            currHeight++;
-                            for (int rx = x; rx < x + currWidth; rx++)
-                            {
-                                visited[Helpers.CoordinatesToIndex(rx, ry, z, width)] = true;
-                            }
-                        }
-                        else
-                        {
-                            break;
-                        }
-                    }
-                    meshData.Add(new GreedyMeshData(x, y, z, currWidth, currHeight, new Vector3Int(0, 0, 1), voxelType));
-                }
-            }
-        }
 
         // Back
-        visited = new bool[width * height * depth];
-        for (int x = 0; x < width; x++)
-        {
-            for (int y = 0; y < height; y++)
-            {
-                for (int z = 0; z < depth; z++)
-                {
-                    byte voxelType = GetVoxel(x, y, z);
-                    JSONData voxelData = database.GetVoxelData(voxelType);
-                    bool isTransparent = voxelType > 0 && voxelData.isTransparent;
-
-                    if (voxelData.type != "Voxel" || visited[Helpers.CoordinatesToIndex(x, y, z, width)] || GetVoxel(x, y, z) == 0 || (GetVoxel(x, y, z - 1) != 0 && database.GetVoxelData(GetVoxel(x, y, z - 1)).isTransparent == isTransparent)) continue;
-                    visited[Helpers.CoordinatesToIndex(x, y, z, width)] = true;
-
-                    int currWidth = 1;
-                    int currHeight = 1;
-
-                    while (x + currWidth < width && GetVoxel(x + currWidth, y, z) != 0 && !visited[Helpers.CoordinatesToIndex(x + currWidth, y, z, width)] && GetVoxel(x + currWidth, y, z - 1) == 0 && GetVoxel(x + currWidth, y, z) == voxelType && database.GetVoxelData(GetVoxel(x + currWidth, y, z)).isTransparent == isTransparent)
-                    {
-                        visited[Helpers.CoordinatesToIndex(x + currWidth, y, z, width)] = true;
-                        currWidth++;
-                    }
-
-                    for (int ry = y + 1; ry < height; ry++)
-                    {
-                        bool rowGood = true;
-                        for (int rx = x; rx < x + currWidth; rx++)
-                        {
-                            if (GetVoxel(rx, ry, z) == 0 || visited[Helpers.CoordinatesToIndex(rx, ry, z, width)] || GetVoxel(rx, ry, z - 1) != 0 || GetVoxel(rx, ry, z) != voxelType || database.GetVoxelData(GetVoxel(rx, ry, z)).isTransparent != isTransparent)
-                            {
-                                rowGood = false;
-                                break;
-                            }
-                        }
-
-                        if (rowGood)
-                        {
-                            currHeight++;
-                            for (int rx = x; rx < x + currWidth; rx++)
-                            {
-                                visited[Helpers.CoordinatesToIndex(rx, ry, z, width)] = true;
-                            }
-                        }
-                        else
-                        {
-                            break;
-                        }
-                    }
-                    meshData.Add(new GreedyMeshData(x, y, z, currWidth, currHeight, new Vector3Int(0, 0, -1), voxelType));
-                }
-            }
-        }
-
+        CalculateGreedy(new Vector3Int(1, 0, 0), new Vector3Int(0, 0, 1));
+        // Front
+        CalculateGreedy(new Vector3Int(-1, 0, 0), new Vector3Int(0, 0, -1));
         // Right
-        visited = new bool[width * height * depth];
-        for (int x = 0; x < width; x++)
-        {
-            for (int y = 0; y < height; y++)
-            {
-                for (int z = 0; z < depth; z++)
-                {
-                    byte voxelType = GetVoxel(x, y, z);
-                    JSONData voxelData = database.GetVoxelData(voxelType);
-                    bool isTransparent = voxelType > 0 && voxelData.isTransparent;
-
-                    if (voxelData.type != "Voxel" || visited[Helpers.CoordinatesToIndex(x, y, z, width)] || GetVoxel(x, y, z) == 0 || (GetVoxel(x + 1, y, z) != 0 && database.GetVoxelData(GetVoxel(x + 1, y, z)).isTransparent == isTransparent)) continue;
-                    visited[Helpers.CoordinatesToIndex(x, y, z, width)] = true;
-
-                    int currWidth = 1;
-                    int currHeight = 1;
-
-                    while (z + currWidth < width && GetVoxel(x, y, z + currWidth) != 0 && !visited[Helpers.CoordinatesToIndex(x, y, z + currWidth, width)] && GetVoxel(x + 1, y, z  + currWidth) == 0 && GetVoxel(x, y, z + currWidth) == voxelType && database.GetVoxelData(GetVoxel(x, y, z + currWidth)).isTransparent == isTransparent)
-                    {
-                        visited[Helpers.CoordinatesToIndex(x, y, z + currWidth, width)] = true;
-                        currWidth++;
-                    }
-
-                    for (int ry = y + 1; ry < height; ry++)
-                    {
-                        bool rowGood = true;
-                        for (int rz = z; rz < z + currWidth; rz++)
-                        {
-                            if (GetVoxel(x, ry, rz) == 0 || visited[Helpers.CoordinatesToIndex(x, ry, rz, width)] || GetVoxel(x + 1, ry, rz) != 0 || GetVoxel(x, ry, rz) != voxelType || database.GetVoxelData(GetVoxel(x, ry, rz)).isTransparent != isTransparent)
-                            {
-                                rowGood = false;
-                                break;
-                            }
-                        }
-
-                        if (rowGood)
-                        {
-                            currHeight++;
-                            for (int rz = z; rz < z + currWidth; rz++)
-                            {
-                                visited[Helpers.CoordinatesToIndex(x, ry, rz, width)] = true;
-                            }
-                        }
-                        else
-                        {
-                            break;
-                        }
-                    }
-                    meshData.Add(new GreedyMeshData(x, y, z, currWidth, currHeight, new Vector3Int(1, 0, 0), voxelType));
-                }
-            }
-        }
-
+        CalculateGreedy(new Vector3Int(0, 0, 1), new Vector3Int(1, 0, 0));
         // Left
-        visited = new bool[width * height * depth];
-        for (int x = 0; x < width; x++)
-        {
-            for (int y = 0; y < height; y++)
-            {
-                for (int z = 0; z < depth; z++)
-                {
-                    byte voxelType = GetVoxel(x, y, z);
-                    JSONData voxelData = database.GetVoxelData(voxelType);
-                    bool isTransparent = voxelType > 0 && voxelData.isTransparent;
-
-                    if (voxelData.type != "Voxel" || visited[Helpers.CoordinatesToIndex(x, y, z, width)] || GetVoxel(x, y, z) == 0 || (GetVoxel(x - 1, y, z) != 0 && database.GetVoxelData(GetVoxel(x - 1, y, z)).isTransparent == isTransparent)) continue;
-                    visited[Helpers.CoordinatesToIndex(x, y, z, width)] = true;
-
-                    int currWidth = 1;
-                    int currHeight = 1;
-
-                    while (z + currWidth < width && GetVoxel(x, y, z + currWidth) != 0 && !visited[Helpers.CoordinatesToIndex(x, y, z + currWidth, width)] && GetVoxel(x - 1, y, z  + currWidth) == 0 && GetVoxel(x, y, z + currWidth) == voxelType && database.GetVoxelData(GetVoxel(x, y, z + currWidth)).isTransparent == isTransparent)
-                    {
-                        visited[Helpers.CoordinatesToIndex(x, y, z + currWidth, width)] = true;
-                        currWidth++;
-                    }
-
-                    for (int ry = y + 1; ry < height; ry++)
-                    {
-                        bool rowGood = true;
-                        for (int rz = z; rz < z + currWidth; rz++)
-                        {
-                            if (GetVoxel(x, ry, rz) == 0 || visited[Helpers.CoordinatesToIndex(x, ry, rz, width)] || GetVoxel(x - 1, ry, rz) != 0 || GetVoxel(x, ry, rz) != voxelType || database.GetVoxelData(GetVoxel(x, ry, rz)).isTransparent != isTransparent)
-                            {
-                                rowGood = false;
-                                break;
-                            }
-                        }
-
-                        if (rowGood)
-                        {
-                            currHeight++;
-                            for (int rz = z; rz < z + currWidth; rz++)
-                            {
-                                visited[Helpers.CoordinatesToIndex(x, ry, rz, width)] = true;
-                            }
-                        }
-                        else
-                        {
-                            break;
-                        }
-                    }
-                    meshData.Add(new GreedyMeshData(x, y, z, currWidth, currHeight, new Vector3Int(-1, 0, 0), voxelType));
-                }
-            }
-        }
-
+        CalculateGreedy(new Vector3Int(0, 0, -1), new Vector3Int(-1, 0, 0));
         // Top
-        visited = new bool[width * height * depth];
-        for (int x = 0; x < width; x++)
-        {
-            for (int y = 0; y < height; y++)
-            {
-                for (int z = 0; z < depth; z++)
-                {
-                    byte voxelType = GetVoxel(x, y, z);
-                    JSONData voxelData = database.GetVoxelData(voxelType);
-                    bool isTransparent = voxelType > 0 && voxelData.isTransparent;
-
-                    if (voxelData.type != "Voxel" || visited[Helpers.CoordinatesToIndex(x, y, z, width)] || GetVoxel(x, y, z) == 0 || (GetVoxel(x, y + 1, z) != 0 && database.GetVoxelData(GetVoxel(x, y + 1, z)).isTransparent == isTransparent)) continue;
-                    visited[Helpers.CoordinatesToIndex(x, y, z, width)] = true;
-
-                    int currWidth = 1;
-                    int currHeight = 1;
-
-                    while (x + currWidth < width && GetVoxel(x + currWidth, y, z) != 0 && !visited[Helpers.CoordinatesToIndex(x + currWidth, y, z, width)] && GetVoxel(x + currWidth, y + 1, z) == 0 && GetVoxel(x + currWidth, y, z) == voxelType && database.GetVoxelData(GetVoxel(x + currWidth, y, z)).isTransparent == isTransparent)
-                    {
-                        visited[Helpers.CoordinatesToIndex(x + currWidth, y, z, width)] = true;
-                        currWidth++;
-                    }
-
-                    for (int rz = z + 1; rz < depth; rz++)
-                    {
-                        bool rowGood = true;
-                        for (int rx = x; rx < x + currWidth; rx++)
-                        {
-                            if (GetVoxel(rx, y, rz) == 0 || visited[Helpers.CoordinatesToIndex(rx, y, rz, width)] || GetVoxel(rx, y + 1, rz) != 0 || GetVoxel(rx, y, rz) != voxelType || database.GetVoxelData(GetVoxel(rx, y, rz)).isTransparent != isTransparent)
-                            {
-                                rowGood = false;
-                                break;
-                            }
-                        }
-
-                        if (rowGood)
-                        {
-                            currHeight++;
-                            for (int rx = x; rx < x + currWidth; rx++)
-                            {
-                                visited[Helpers.CoordinatesToIndex(rx, y, rz, width)] = true;
-                            }
-                        }
-                        else
-                        {
-                            break;
-                        }
-                    }
-                    meshData.Add(new GreedyMeshData(x, y, z, currWidth, currHeight, new Vector3Int(0, 1, 0), voxelType));
-                }
-            }
-        }
-
+        CalculateGreedy(new Vector3Int(0, 1, 0), new Vector3Int(0, 1, 0));
         // Bottom
-        visited = new bool[width * height * depth];
-        for (int x = 0; x < width; x++)
-        {
-            for (int y = 0; y < height; y++)
-            {
-                for (int z = 0; z < depth; z++)
-                {
-                    byte voxelType = GetVoxel(x, y, z);
-                    JSONData voxelData = database.GetVoxelData(voxelType);
-                    bool isTransparent = voxelType > 0 && voxelData.isTransparent;
-
-                    if (voxelData.type != "Voxel" || visited[Helpers.CoordinatesToIndex(x, y, z, width)] || GetVoxel(x, y, z) == 0 || (GetVoxel(x, y - 1, z) != 0 && database.GetVoxelData(GetVoxel(x, y - 1, z)).isTransparent == isTransparent)) continue;
-                    visited[Helpers.CoordinatesToIndex(x, y, z, width)] = true;
-
-                    int currWidth = 1;
-                    int currHeight = 1;
-
-                    while (x + currWidth < width && GetVoxel(x + currWidth, y, z) != 0 && !visited[Helpers.CoordinatesToIndex(x + currWidth, y, z, width)] && GetVoxel(x + currWidth, y - 1, z) == 0 && GetVoxel(x + currWidth, y, z) == voxelType && database.GetVoxelData(GetVoxel(x + currWidth, y, z)).isTransparent == isTransparent)
-                    {
-                        visited[Helpers.CoordinatesToIndex(x + currWidth, y, z, width)] = true;
-                        currWidth++;
-                    }
-
-                    for (int rz = z + 1; rz < depth; rz++)
-                    {
-                        bool rowGood = true;
-                        for (int rx = x; rx < x + currWidth; rx++)
-                        {
-                            if (GetVoxel(rx, y, rz) == 0 || visited[Helpers.CoordinatesToIndex(rx, y, rz, width)] || GetVoxel(rx, y - 1, rz) != 0 || GetVoxel(rx, y, rz) != voxelType || database.GetVoxelData(GetVoxel(rx, y, rz)).isTransparent != isTransparent)
-                            {
-                                rowGood = false;
-                                break;
-                            }
-                        }
-
-                        if (rowGood)
-                        {
-                            currHeight++;
-                            for (int rx = x; rx < x + currWidth; rx++)
-                            {
-                                visited[Helpers.CoordinatesToIndex(rx, y, rz, width)] = true;
-                            }
-                        }
-                        else
-                        {
-                            break;
-                        }
-                    }
-                    meshData.Add(new GreedyMeshData(x, y, z, currWidth, currHeight, new Vector3Int(0, -1, 0), voxelType));
-                }
-            }
-        }
+        CalculateGreedy(new Vector3Int(0, -1, 0), new Vector3Int(0, -1, 0));
 
         MeshData solidMeshData = new MeshData();
         MeshData transparentMeshData = new MeshData();
@@ -376,123 +64,17 @@ public class GreedyMesher
         {
             JSONData voxelData = database.GetVoxelData(data.type);
             MeshData target = voxelData.isTransparent ? transparentMeshData : solidMeshData;
-            Debug.Log("Voxel data: " + voxelData.displayName);
-            
-            float uRepeat = data.width;
-            float vRepeat = data.height;
 
-            // Front
-            if (data.direction == new Vector3Int(0, 0, 1))
+            switch (voxelData.type)
             {
-                int vertexIndex = target.vertices.Count;
-
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, 1));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 0, 1));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height, 1));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, data.height, 1));
-
-                // Add UVs with tiling
-                target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 2));
-                target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 2));
-                target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 2));
-                target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 2));
-
-                for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[0, j]);
-            }
-
-            // Back
-            if (data.direction == new Vector3Int(0, 0, -1))
-            {
-                int vertexIndex = target.vertices.Count;
-
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 0, 0));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, data.height, 0));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, 0));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height, 0));
-
-                // Add UVs with tiling
-                target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 3));
-                target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 3));
-                target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 3));
-                target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 3));
-
-                for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[1, j]);
-            }
-
-            // Right
-            if (data.direction == new Vector3Int(1, 0, 0))
-            {
-                int vertexIndex = target.vertices.Count;
-
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(1, 0, 0));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(1, data.height, 0));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(1, 0, data.width));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(1, data.height, data.width));
-
-                // Add UVs with tiling
-                target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 4));
-                target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 4));
-                target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 4));
-                target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 4));
-
-                for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[4, j]);
-            }
-
-            // Left
-            if (data.direction == new Vector3Int(-1, 0, 0))
-            {
-                int vertexIndex = target.vertices.Count;
-
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, 0));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, data.width));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height, 0));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height, data.width));
-
-                // Add UVs with tiling
-                target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 5));
-                target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 5));
-                target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 5));
-                target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 5));
-
-                for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[5, j]);
-            }
-
-            // Top
-            if (data.direction == new Vector3Int(0, 1, 0))
-            {
-                int vertexIndex = target.vertices.Count;
-
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 1, data.height));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 1, data.height));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 1, 0));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 1, 0));
-
-                // Add UVs with tiling
-                target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 0));
-                target.uvs.Add(new Vector4(0, uRepeat, voxelData.GetId(), 0));
-                target.uvs.Add(new Vector4(vRepeat, 0, voxelData.GetId(), 0));
-                target.uvs.Add(new Vector4(vRepeat, uRepeat, voxelData.GetId(), 0));
-
-                for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[2, j]);
-            }
-
-            // Bottom
-            if (data.direction == new Vector3Int(0, -1, 0))
-            {
-                int vertexIndex = target.vertices.Count;
-
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, data.height));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, 0));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 0, data.height));
-                target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 0, 0));
-
-                // Add UVs with tiling
-                target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 1));
-                target.uvs.Add(new Vector4(vRepeat, 0, voxelData.GetId(), 1));
-                target.uvs.Add(new Vector4(0, uRepeat, voxelData.GetId(), 1));
-                target.uvs.Add(new Vector4(vRepeat, uRepeat, voxelData.GetId(), 1));
-
-                for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[3, j]);
+                case "Voxel":
+                    BuildVoxel(data, voxelData, target);
+                    break;
+                case "Liquid":
+                    BuildLiquid(data, voxelData, target);
+                    break;
+                default:
+                    break;
             }
         }
 
@@ -511,11 +93,352 @@ public class GreedyMesher
         return mesh;
     }
 
+    private bool ShouldSkip(int x, int y, int z, Vector3Int dir, Vector3Int facing, bool[] visited)
+    {
+        if (visited[Helpers.CoordinatesToIndex(x, y, z, width)]){ return true;}
+
+        // Current
+        byte voxelType = GetVoxel(x, y, z);
+        if (voxelType == 0){ return true;}
+
+        JSONData voxelData = database.GetVoxelData(voxelType);
+        if (!voxelData.canGreedyMesh){ return true;}
+
+        // Facing
+        byte facingVoxel = GetVoxel(x + facing.x, y + facing.y, z + facing.z);
+        JSONData facingData = database.GetVoxelData(facingVoxel);
+        if(facingVoxel != 0 && facingData.isTransparent == voxelData.isTransparent){ return true;}
+
+        return false;
+    }
+
+    private bool ValidNeighbour(int x1, int y1, int z1, int x2, int y2, int z2, Vector3Int facing, bool[] visited)
+    {
+        int visitedIndex = Helpers.CoordinatesToIndex(x2, y2, z2, width);
+        if (visitedIndex >= 0 && visited[visitedIndex]) return false;
+
+        // Current
+        byte voxelType = GetVoxel(x1, y1, z1);
+        JSONData voxelData = database.GetVoxelData(voxelType);
+
+        // Neighbour
+        byte neighbour = GetVoxel(x2, y2, z2);
+        if (neighbour == 0) return false;
+        if (neighbour != voxelType) return false;
+
+        JSONData neighbourData = database.GetVoxelData(neighbour);
+        if(neighbourData.isTransparent != voxelData.isTransparent) return false;
+        if (!neighbourData.canGreedyMesh){ return false;}
+
+        // Facing
+        byte facingVoxel = GetVoxel(x2 + facing.x, y2 + facing.y, z2 + facing.z);
+        JSONData facingData = database.GetVoxelData(facingVoxel);
+        if(facingVoxel != 0 && facingData.isTransparent == voxelData.isTransparent) return false;
+
+        return true;
+    }
+
+    private void CalculateGreedy(Vector3Int dir, Vector3Int facing)
+    {
+        bool[] visited = new bool[width * height * depth];
+        for (int z = 0; z < depth; z++)
+        {
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    if (ShouldSkip(x, y, z, dir, facing, visited)) continue;
+                    visited[Helpers.CoordinatesToIndex(x, y, z, width)] = true;
+
+                    int currWidth = 1;
+                    int currHeight = 1;
+
+                    bool isY = dir.y != 0;
+                    bool isX = isY ? true : dir.x != 0;
+                    while ((isX ? x : z) + currWidth < width && ValidNeighbour(x, y, z, x + (isX ? currWidth : 0), y, z + (!isX ? currWidth : 0), facing, visited))
+                    {
+                        visited[Helpers.CoordinatesToIndex(x + (isX ? currWidth : 0), y, z + (!isX ? currWidth : 0), width)] = true;
+                        currWidth++;
+                    }
+
+                    for (int ry = (!isY ? y : z) + 1; ry < height; ry++)
+                    {
+                        bool rowGood = true;
+                        for (int rx = x; rx < x + currWidth; rx++)
+                        {
+                            if (!ValidNeighbour(x, y, z, !isX ? x : rx, !isY ? ry : y, !isY ? isX ? z : rx : ry, facing, visited))
+                            {
+                                rowGood = false;
+                                break;
+                            }
+                        }
+
+                        if (rowGood)
+                        {
+                            currHeight++;
+                            for (int rx = x; rx < x + currWidth; rx++)
+                            {
+                                visited[Helpers.CoordinatesToIndex(!isX ? x : rx, !isY ? ry : y, !isY ? isX ? z : rx : ry, width)] = true;
+                            }
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
+
+                    meshData.Add(new GreedyMeshData(x, y, z, currWidth, currHeight, facing, GetVoxel(x, y, z)));
+                }
+            }
+        }
+    }
+
     private byte GetVoxel(int x, int y, int z)
     {
         if (x < 0 || x >= width || y < 0 || y >= height || z < 0 || z >= depth)
             return 0;
         return voxelData[x + y * width + z * width * height];
+    }
+
+    private void BuildVoxel(GreedyMeshData data, JSONData voxelData, MeshData target)
+    {
+        float uRepeat = data.width;
+        float vRepeat = data.height;
+
+        // Front
+        if (data.direction == new Vector3Int(0, 0, 1))
+        {
+            int vertexIndex = target.vertices.Count;
+
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, 1));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 0, 1));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height, 1));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, data.height, 1));
+
+            // Add UVs with tiling
+            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 2));
+            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 2));
+            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 2));
+            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 2));
+
+            for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[0, j]);
+        }
+
+        // Back
+        if (data.direction == new Vector3Int(0, 0, -1))
+        {
+            int vertexIndex = target.vertices.Count;
+
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 0, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, data.height, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height, 0));
+
+            // Add UVs with tiling
+            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 3));
+            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 3));
+            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 3));
+            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 3));
+
+            for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[1, j]);
+        }
+
+        // Right
+        if (data.direction == new Vector3Int(1, 0, 0))
+        {
+            int vertexIndex = target.vertices.Count;
+
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(1, 0, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(1, data.height, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(1, 0, data.width));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(1, data.height, data.width));
+
+            // Add UVs with tiling
+            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 4));
+            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 4));
+            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 4));
+            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 4));
+
+            for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[4, j]);
+        }
+
+        // Left
+        if (data.direction == new Vector3Int(-1, 0, 0))
+        {
+            int vertexIndex = target.vertices.Count;
+
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, data.width));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height, data.width));
+
+            // Add UVs with tiling
+            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 5));
+            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 5));
+            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 5));
+            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 5));
+
+            for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[5, j]);
+        }
+
+        // Top
+        if (data.direction == new Vector3Int(0, 1, 0))
+        {
+            int vertexIndex = target.vertices.Count;
+
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 1, data.height));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 1, data.height));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 1, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 1, 0));
+
+            // Add UVs with tiling
+            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 0));
+            target.uvs.Add(new Vector4(0, uRepeat, voxelData.GetId(), 0));
+            target.uvs.Add(new Vector4(vRepeat, 0, voxelData.GetId(), 0));
+            target.uvs.Add(new Vector4(vRepeat, uRepeat, voxelData.GetId(), 0));
+
+            for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[2, j]);
+        }
+
+        // Bottom
+        if (data.direction == new Vector3Int(0, -1, 0))
+        {
+            int vertexIndex = target.vertices.Count;
+
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, data.height));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 0, data.height));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 0, 0));
+
+            // Add UVs with tiling
+            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 1));
+            target.uvs.Add(new Vector4(vRepeat, 0, voxelData.GetId(), 1));
+            target.uvs.Add(new Vector4(0, uRepeat, voxelData.GetId(), 1));
+            target.uvs.Add(new Vector4(vRepeat, uRepeat, voxelData.GetId(), 1));
+
+            for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[3, j]);
+        }
+    }
+
+    private void BuildLiquid(GreedyMeshData data, JSONData voxelData, MeshData target)
+    {
+        float uRepeat = data.width;
+        float vRepeat = data.height;
+        float liquidOffset = 1f / 16f * 2f;
+
+        // Front
+        if (data.direction == new Vector3Int(0, 0, 1))
+        {
+            int vertexIndex = target.vertices.Count;
+
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, 1));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 0, 1));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height - liquidOffset, 1));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, data.height - liquidOffset, 1));
+
+            // Add UVs with tiling
+            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 2));
+            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 2));
+            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 2));
+            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 2));
+
+            for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[0, j]);
+        }
+
+        // Back
+        if (data.direction == new Vector3Int(0, 0, -1))
+        {
+            int vertexIndex = target.vertices.Count;
+
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 0, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, data.height - liquidOffset, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height - liquidOffset, 0));
+
+            // Add UVs with tiling
+            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 3));
+            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 3));
+            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 3));
+            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 3));
+
+            for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[1, j]);
+        }
+
+        // Right
+        if (data.direction == new Vector3Int(1, 0, 0))
+        {
+            int vertexIndex = target.vertices.Count;
+
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(1, 0, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(1, data.height - liquidOffset, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(1, 0, data.width));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(1, data.height - liquidOffset, data.width));
+
+            // Add UVs with tiling
+            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 4));
+            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 4));
+            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 4));
+            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 4));
+
+            for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[4, j]);
+        }
+
+        // Left
+        if (data.direction == new Vector3Int(-1, 0, 0))
+        {
+            int vertexIndex = target.vertices.Count;
+
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, data.width));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height - liquidOffset, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height - liquidOffset, data.width));
+
+            // Add UVs with tiling
+            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 5));
+            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 5));
+            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 5));
+            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 5));
+
+            for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[5, j]);
+        }
+
+        // Top
+        if (data.direction == new Vector3Int(0, 1, 0))
+        {
+            int vertexIndex = target.vertices.Count;
+
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 1 - liquidOffset, data.height));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 1 - liquidOffset, data.height));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 1 - liquidOffset, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 1 - liquidOffset, 0));
+
+            // Add UVs with tiling
+            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 0));
+            target.uvs.Add(new Vector4(0, uRepeat, voxelData.GetId(), 0));
+            target.uvs.Add(new Vector4(vRepeat, 0, voxelData.GetId(), 0));
+            target.uvs.Add(new Vector4(vRepeat, uRepeat, voxelData.GetId(), 0));
+
+            for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[2, j]);
+        }
+
+        // Bottom
+        if (data.direction == new Vector3Int(0, -1, 0))
+        {
+            int vertexIndex = target.vertices.Count;
+
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, data.height));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, 0, 0));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 0, data.height));
+            target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 0, 0));
+
+            // Add UVs with tiling
+            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 1));
+            target.uvs.Add(new Vector4(vRepeat, 0, voxelData.GetId(), 1));
+            target.uvs.Add(new Vector4(0, uRepeat, voxelData.GetId(), 1));
+            target.uvs.Add(new Vector4(vRepeat, uRepeat, voxelData.GetId(), 1));
+
+            for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[3, j]);
+        }
     }
 
     // Directions for neighbor checking

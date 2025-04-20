@@ -2,7 +2,7 @@
     "id": 4,
     "type": "Voxel",
     "displayName": "Grass",
-    "folder": "grass",
+    "folder": "grass_voxel",
     "textures": [
         {
             "up": "top.png",
@@ -13,7 +13,7 @@
             "west": "side.png"
         }
     ],
-    "animationSpeed": 0.5,
+    "canGreedyMesh": true,
     "isTransparent": false,
     "sound": "grass"
 }
