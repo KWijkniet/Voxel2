@@ -54,7 +54,7 @@ public class ChunkCalculator : MonoBehaviour
                 {
                     voxels[index] = (byte)(useRandomVoxels ? Random.Range(0f, 1f) * (database.VoxelCount() - 1) + 1 : voxelIndex);
                     // voxels[index] = (byte)(y < maxY ? Random.Range(0f, 1f) > percentage ? useRandomVoxels ? Random.Range(0f, 1f) * (database.VoxelCount() - 1) + 1 : voxelIndex : 0 : 0);
-                    if(x > 1) voxels[index] = 0;
+                    if(y > 0) voxels[index] = 0;
                     index++;
                 }
             }

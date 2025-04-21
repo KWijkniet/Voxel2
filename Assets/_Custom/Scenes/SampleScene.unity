@@ -1169,8 +1169,8 @@ MonoBehaviour:
   size: 16
   maxY: 16
   useGreedyMesh: 1
-  useRandomVoxels: 0
-  voxelIndex: 3
+  useRandomVoxels: 1
+  voxelIndex: 1
   percentage: 0
   materials:
   - {fileID: 2100000, guid: 977ab5072397ac04991064951693255d, type: 2}
