@@ -1,0 +1,18 @@
+{
+    "id": 6,
+    "type": "Voxel",
+    "displayName": "Oak Log",
+    "folder": "oak_log",
+    "textures": [
+        {
+            "up": "top.png",
+            "down": "top.png",
+            "north": "side.png",
+            "south": "side.png",
+            "east": "side.png",
+            "west": "side.png"
+        }
+    ],
+    "canGreedyMesh": true,
+    "sound": "wood"
+}

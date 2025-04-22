@@ -29,9 +29,11 @@ public class ChunkCalculator : MonoBehaviour
             Graphics.RenderMesh(renderParams[0], greedyMesh, 0, Matrix4x4.identity);
             Graphics.RenderMesh(renderParams[1], greedyMesh, 1, Matrix4x4.identity);
         }
+
         if(detailMesh != null)
         {
-            Graphics.RenderMesh(renderParams[0], detailMesh, 0, Matrix4x4.identity);
+            Graphics.RenderMesh(renderParams[2], detailMesh, 0, Matrix4x4.identity);
+            Graphics.RenderMesh(renderParams[2], detailMesh, 1, Matrix4x4.identity);
         }
     }
 
@@ -44,21 +46,22 @@ public class ChunkCalculator : MonoBehaviour
             return;
         }
 
-        voxels = new byte[size*size*size];
-        int index = 0;
-        for (int z = 0; z < size; z++)
-        {
-            for (int y = 0; y < size; y++)
-            {
-                for (int x = 0; x < size; x++)
-                {
-                    voxels[index] = (byte)(useRandomVoxels ? Random.Range(0f, 1f) * (database.VoxelCount() - 1) + 1 : voxelIndex);
-                    // voxels[index] = (byte)(y < maxY ? Random.Range(0f, 1f) > percentage ? useRandomVoxels ? Random.Range(0f, 1f) * (database.VoxelCount() - 1) + 1 : voxelIndex : 0 : 0);
-                    if(y > 0) voxels[index] = 0;
-                    index++;
-                }
-            }
-        }
+        CalculateChunk();
+        // voxels = new byte[size*size*size];
+        // int index = 0;
+        // for (int z = 0; z < size; z++)
+        // {
+        //     for (int y = 0; y < size; y++)
+        //     {
+        //         for (int x = 0; x < size; x++)
+        //         {
+        //             voxels[index] = (byte)(useRandomVoxels ? Random.Range(0f, 1f) * (database.VoxelCount() - 1) + 1 : voxelIndex);
+        //             // voxels[index] = (byte)(y < maxY ? Random.Range(0f, 1f) > percentage ? useRandomVoxels ? Random.Range(0f, 1f) * (database.VoxelCount() - 1) + 1 : voxelIndex : 0 : 0);
+        //             if(y > maxY) voxels[index] = 0;
+        //             index++;
+        //         }
+        //     }
+        // }
 
         // for (int i = 0; i < voxels.Length; i++)
         // {
@@ -70,10 +73,10 @@ public class ChunkCalculator : MonoBehaviour
         if (greedyMesh != null) greedyMesh.Clear();
         greedyMesh = gm.GenerateMesh();
 
-        // // Details
-        // DetailMesher dm = new DetailMesher(database, voxels, size, size, size);
-        // if (detailMesh != null) detailMesh.Clear();
-        // detailMesh = dm.GenerateMesh();
+        // Details
+        DetailMesher dm = new DetailMesher(database, voxels, size, size, size);
+        if (detailMesh != null) detailMesh.Clear();
+        detailMesh = dm.GenerateMesh();
     }
 
     public void Clear()
@@ -87,14 +90,13 @@ public class ChunkCalculator : MonoBehaviour
         
         foreach (Material material in materials)
         {
-            
             // Set the buffer and texture array to the material
             material.SetBuffer("_VoxelBuffer", database.GetVoxelBuffer());
             material.SetTexture("_MainTex", database.GetTexture2DArray());
         }
 
         renderParams = new List<RenderParams>();
-        for (int i = 0; i < 2; i++)
+        for (int i = 0; i < materials.Count; i++)
         {
             RenderParams renderParam = new RenderParams(materials[i]);
             renderParam.instanceID = gameObject.GetInstanceID();
@@ -105,5 +107,37 @@ public class ChunkCalculator : MonoBehaviour
             renderParam.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
             renderParams.Add(renderParam);
         }
+    }
+
+    private void CalculateChunk(){
+        for (int z = 0; z < size; z++)
+        {
+            for (int y = 0; y < size; y++)
+            {
+                for (int x = 0; x < size; x++)
+                {
+                    int maxHeight = Mathf.RoundToInt(Mathf.PerlinNoise(x * 0.1f, z * 0.1f) * 16f);
+                    int index = GetVoxel(x, y, z);
+                    if (index < 0) Debug.LogWarning("ChunkCalculator: Voxel not found");
+                    voxels[index] = 0;
+
+                    if (y <= maxHeight)
+                    {
+                        if (y < 8) voxels[index] = (byte)1;
+                        else if (y < maxHeight) voxels[index] = (byte)2;
+                        else if (y <= maxHeight) voxels[index] = (byte)4;
+                    }
+                    else if (y < 11) voxels[index] = (byte)3;
+                    else if (y == maxHeight + 1 && Random.Range(0f, 1f) > 0.75f) voxels[index] = (byte)5;
+                }
+            }
+        }
+    }
+
+    private int GetVoxel(int x, int y, int z)
+    {
+        if (x < 0 || x >= size || y < 0 || y >= size || z < 0 || z >= size)
+            return -1;
+        return x + y * size + z * size * size;
     }
 }

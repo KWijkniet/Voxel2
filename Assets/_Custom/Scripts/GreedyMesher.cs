@@ -102,17 +102,12 @@ public class GreedyMesher
         if (voxelType == 0){ return true;}
 
         JSONData voxelData = database.GetVoxelData(voxelType);
-        // if (!voxelData.canGreedyMesh){ return true;}
+        if (!voxelData.canGreedyMesh){ return true;}
 
         // Facing
         byte facingVoxel = GetVoxel(x + facing.x, y + facing.y, z + facing.z);
         JSONData facingData = database.GetVoxelData(facingVoxel);
-        // if(facingVoxel != 0 && facingData.isTransparent == voxelData.isTransparent){ return true;}
-        if (facingVoxel != 0)
-        {
-            if (facingData.isTransparent == voxelData.isTransparent) return true;
-            // if (!facingData.canGreedyMesh) return true;
-        }
+        if(facingVoxel != 0 && (facingData.isTransparent == voxelData.isTransparent && facingVoxel == voxelType && facingData.canGreedyMesh)){ return true;}
 
         return false;
     }
@@ -125,7 +120,7 @@ public class GreedyMesher
         // Current
         byte voxelType = GetVoxel(x1, y1, z1);
         JSONData voxelData = database.GetVoxelData(voxelType);
-        // if (!voxelData.canGreedyMesh){ return false;}
+        if (!voxelData.canGreedyMesh){ return false;}
 
         // Neighbour
         byte neighbour = GetVoxel(x2, y2, z2);
@@ -134,17 +129,11 @@ public class GreedyMesher
 
         JSONData neighbourData = database.GetVoxelData(neighbour);
         if(neighbourData.isTransparent != voxelData.isTransparent) return false;
-        // if (!neighbourData.canGreedyMesh){ return false;}
 
         // Facing
         byte facingVoxel = GetVoxel(x2 + facing.x, y2 + facing.y, z2 + facing.z);
         JSONData facingData = database.GetVoxelData(facingVoxel);
-        if (facingVoxel != 0)
-        {
-            if (facingData.isTransparent == voxelData.isTransparent) return false;
-            // if (!facingData.canGreedyMesh) return false;
-            // if (facingData.)
-        }
+        if(facingVoxel != 0 && (facingData.isTransparent == voxelData.isTransparent && facingData.canGreedyMesh)){ return false;}
 
         return true;
     }
@@ -172,14 +161,11 @@ public class GreedyMesher
                         currWidth++;
                     }
 
-                    if (dir.y == 1) Debug.Log((!isY ? "y" : "z"));
                     for (int ry = (!isY ? y : z) + 1; ry < height; ry++)
                     {
                         bool rowGood = true;
-                        if (dir.y == 1) Debug.Log((!isY && isX ? "x" : "z"));
-                        for (int rx = (!isY && isX ? x : z); rx < (!isY && isX ? x : z) + currWidth; rx++)
+                        for (int rx = (isX ? x : z); rx < (isX ? x : z) + currWidth; rx++)
                         {
-                            if (dir.y == 1) Debug.Log((!isX ? "x" : "rx") + " - " + (!isY ? "ry" : "y") + " - " + (!isY ? isX ? "z" : "rx" : "ry"));
                             if (!ValidNeighbour(x, y, z, !isX ? x : rx, !isY ? ry : y, !isY ? isX ? z : rx : ry, facing, visited))
                             {
                                 rowGood = false;
@@ -190,7 +176,7 @@ public class GreedyMesher
                         if (rowGood)
                         {
                             currHeight++;
-                            for (int rx = (!isY && isX ? x : z); rx < (!isY && isX ? x : z) + currWidth; rx++)
+                            for (int rx = (isX ? x : z); rx < (isX ? x : z) + currWidth; rx++)
                             {
                                 visited[Helpers.CoordinatesToIndex(!isX ? x : rx, !isY ? ry : y, !isY ? isX ? z : rx : ry, width)] = true;
                             }

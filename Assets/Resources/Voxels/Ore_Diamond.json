@@ -1,0 +1,20 @@
+{
+    "id": 7,
+    "type": "Voxel",
+    "displayName": "Diamond Ore",
+    "folder": "ore_diamond",
+    "textures": [
+        {
+            "up": "texture.png",
+            "down": "texture.png",
+            "north": "texture.png",
+            "south": "texture.png",
+            "east": "texture.png",
+            "west": "texture.png"
+        }
+    ],
+    "canGreedyMesh": true,
+    "animationSpeed": 1,
+    "isTransparent": false,
+    "sound": "stone"
+}

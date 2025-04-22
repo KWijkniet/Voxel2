@@ -1170,10 +1170,11 @@ MonoBehaviour:
   maxY: 16
   useGreedyMesh: 1
   useRandomVoxels: 1
-  voxelIndex: 1
+  voxelIndex: 3
   percentage: 0
   materials:
   - {fileID: 2100000, guid: 977ab5072397ac04991064951693255d, type: 2}
+  - {fileID: 2100000, guid: bb1ce87355cb724458ebe17bdb471b87, type: 2}
   - {fileID: 2100000, guid: 2d8e38f8a77699e4a93767920037dc44, type: 2}
 --- !u!4 &2040203239
 Transform:
