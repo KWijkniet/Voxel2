@@ -9,11 +9,13 @@ namespace Custom.Importer
     public class ImportController
     {
         public List<JSONData> voxels;
+        public List<JSONStructure> structures;
         public List<TextureData> textures;
-        public string targetDirName;
-        public Texture2DArray texture2DArray;
 
+        public Texture2DArray texture2DArray;
         public ComputeBuffer voxelBuffer;
+
+        private string targetDirName;
         private static ImportController instance;
 
         public static ImportController GetInstance(string targetDirName = null)
@@ -36,6 +38,7 @@ namespace Custom.Importer
             if (voxelBuffer != null) voxelBuffer.Release();
 
             voxels = new List<JSONData>();
+            structures = new List<JSONStructure>();
             textures = new List<TextureData>();
 
             ImportInternal();
@@ -52,20 +55,31 @@ namespace Custom.Importer
 
         private void ImportInternal()
         {
+            // Voxels
             TextAsset[] jsonFiles = Resources.LoadAll<TextAsset>("Voxels");
             foreach (TextAsset jsonFile in jsonFiles)
             {
                 voxels.Add(JsonConvert.DeserializeObject<JSONData>(jsonFile.text));
             }
             voxels = voxels.OrderBy(voxel => voxel.id).ToList();
+
+            // Textures
             ImportInternalTextures();
+
+            // Structures
+            jsonFiles = Resources.LoadAll<TextAsset>("Structures");
+            foreach (TextAsset jsonFile in jsonFiles)
+            {
+                structures.Add(JsonConvert.DeserializeObject<JSONStructure>(jsonFile.text));
+            }
+            structures = structures.OrderBy(structure => structure.id).ToList();
         }
 
         private void ImportInternalTextures()
         {
             foreach (JSONData voxel in voxels)
             {
-                string path = "Data/" + voxel.folder + "/textures/";
+                string path = "Textures/";
                 if (voxel.type == "VOID") continue;
 
                 foreach (AnimationFrame texture in voxel.textures)
@@ -196,17 +210,5 @@ namespace Custom.Importer
         public float animationSpeed; // Number of animation frames for this voxel
         public int isLiquid;
         public fixed int directions[6 * 8]; // 6 directions, 8 frames max
-    }
-
-    [System.Serializable]
-    unsafe struct CBFrame
-    {
-        public fixed int directions[6]; // 6 directions per frame
-    }
-
-    public enum ImportTarget
-    {
-        INTERNAL,
-        EXTERNAL
     }
 }

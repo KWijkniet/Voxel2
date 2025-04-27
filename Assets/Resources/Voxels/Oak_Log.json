@@ -2,15 +2,14 @@
     "id": 6,
     "type": "Voxel",
     "displayName": "Oak Log",
-    "folder": "oak_log",
     "textures": [
         {
-            "up": "top.png",
-            "down": "top.png",
-            "north": "side.png",
-            "south": "side.png",
-            "east": "side.png",
-            "west": "side.png"
+            "up": "oak_log/top.png",
+            "down": "oak_log/top.png",
+            "north": "oak_log/side.png",
+            "south": "oak_log/side.png",
+            "east": "oak_log/side.png",
+            "west": "oak_log/side.png"
         }
     ],
     "canGreedyMesh": true,

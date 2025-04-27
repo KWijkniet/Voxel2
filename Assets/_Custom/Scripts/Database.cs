@@ -23,6 +23,19 @@ public class Database : ScriptableObject
         return null;
     }
 
+    public JSONStructure GetStructure(int index)
+    {
+        ImportController importController = ImportController.GetInstance();
+        foreach (JSONStructure structure in importController.structures)
+        {
+            if (int.Parse(structure.id) == index)
+            {
+                return structure;
+            }
+        }
+        return null;
+    }
+
     public Texture2DArray GetTexture2DArray()
     {
         ImportController importController = ImportController.GetInstance();

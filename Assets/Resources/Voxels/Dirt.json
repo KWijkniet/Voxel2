@@ -2,15 +2,14 @@
     "id": 2,
     "type": "Voxel",
     "displayName": "Dirt",
-    "folder": "dirt",
     "textures": [
         {
-            "up": "texture.png",
-            "down": "texture.png",
-            "north": "texture.png",
-            "south": "texture.png",
-            "east": "texture.png",
-            "west": "texture.png"
+            "up": "dirt/texture.png",
+            "down": "dirt/texture.png",
+            "north": "dirt/texture.png",
+            "south": "dirt/texture.png",
+            "east": "dirt/texture.png",
+            "west": "dirt/texture.png"
         }
     ],
     "canGreedyMesh": true,

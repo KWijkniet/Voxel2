@@ -2,15 +2,14 @@
     "id": 9,
     "type": "Voxel",
     "displayName": "Oak Leaves",
-    "folder": "oak_leaves",
     "textures": [
         {
-            "up": "texture.png",
-            "down": "texture.png",
-            "north": "texture.png",
-            "south": "texture.png",
-            "east": "texture.png",
-            "west": "texture.png"
+            "up": "oak_leaves/texture.png",
+            "down": "oak_leaves/texture.png",
+            "north": "oak_leaves/texture.png",
+            "south": "oak_leaves/texture.png",
+            "east": "oak_leaves/texture.png",
+            "west": "oak_leaves/texture.png"
         }
     ],
     "canGreedyMesh": true,

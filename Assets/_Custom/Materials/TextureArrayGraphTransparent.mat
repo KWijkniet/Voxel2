@@ -7,7 +7,7 @@ Material:
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_Name: TextureArrayGraphTransparent 1
+  m_Name: TextureArrayGraphTransparent
   m_Shader: {fileID: -6465566751694194690, guid: e6aabed90b6918e44bdbca5d711ba453, type: 3}
   m_Parent: {fileID: 0}
   m_ModifiedSerializedProperties: 0
@@ -108,7 +108,7 @@ Material:
     - _GlossMapScale: 0
     - _Glossiness: 0
     - _GlossyReflections: 0
-    - _Metallic: 1
+    - _Metallic: 0
     - _Object_Sway: 0
     - _OcclusionStrength: 1
     - _Parallax: 0.005

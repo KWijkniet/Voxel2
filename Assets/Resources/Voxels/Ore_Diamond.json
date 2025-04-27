@@ -2,15 +2,14 @@
     "id": 7,
     "type": "Voxel",
     "displayName": "Diamond Ore",
-    "folder": "ore_diamond",
     "textures": [
         {
-            "up": "texture.png",
-            "down": "texture.png",
-            "north": "texture.png",
-            "south": "texture.png",
-            "east": "texture.png",
-            "west": "texture.png"
+            "up": "ore_diamond/texture.png",
+            "down": "ore_diamond/texture.png",
+            "north": "ore_diamond/texture.png",
+            "south": "ore_diamond/texture.png",
+            "east": "ore_diamond/texture.png",
+            "west": "ore_diamond/texture.png"
         }
     ],
     "canGreedyMesh": true,

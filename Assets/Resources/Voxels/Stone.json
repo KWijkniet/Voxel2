@@ -2,15 +2,14 @@
     "id": 1,
     "type": "Voxel",
     "displayName": "Stone",
-    "folder": "stone",
     "textures": [
         {
-            "up": "texture.png",
-            "down": "texture.png",
-            "north": "texture.png",
-            "south": "texture.png",
-            "east": "texture.png",
-            "west": "texture.png"
+            "up": "stone/texture.png",
+            "down": "stone/texture.png",
+            "north": "stone/texture.png",
+            "south": "stone/texture.png",
+            "east": "stone/texture.png",
+            "west": "stone/texture.png"
         }
     ],
     "canGreedyMesh": true,

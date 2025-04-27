@@ -2,15 +2,14 @@
     "id": 4,
     "type": "Voxel",
     "displayName": "Grass",
-    "folder": "grass_voxel",
     "textures": [
         {
-            "up": "top.png",
-            "down": "bottom.png",
-            "north": "side.png",
-            "south": "side.png",
-            "east": "side.png",
-            "west": "side.png"
+            "up": "grass_voxel/top.png",
+            "down": "dirt/texture.png",
+            "north": "grass_voxel/side.png",
+            "south": "grass_voxel/side.png",
+            "east": "grass_voxel/side.png",
+            "west": "grass_voxel/side.png"
         }
     ],
     "canGreedyMesh": true,

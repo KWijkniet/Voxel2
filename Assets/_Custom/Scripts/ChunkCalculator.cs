@@ -1,5 +1,7 @@
 using System.Collections.Generic;
+using Unity.Collections;
 using UnityEngine;
+using Custom.Importer;
 
 [ExecuteInEditMode]
 public class ChunkCalculator : MonoBehaviour
@@ -46,28 +48,8 @@ public class ChunkCalculator : MonoBehaviour
             return;
         }
 
+        voxels = new byte[size*size*size];
         CalculateChunk();
-        // voxels = new byte[size*size*size];
-        // int index = 0;
-        // for (int z = 0; z < size; z++)
-        // {
-        //     for (int y = 0; y < size; y++)
-        //     {
-        //         for (int x = 0; x < size; x++)
-        //         {
-        //             voxels[index] = (byte)(useRandomVoxels ? Random.Range(0f, 1f) * (database.VoxelCount() - 1) + 1 : voxelIndex);
-        //             // voxels[index] = (byte)(y < maxY ? Random.Range(0f, 1f) > percentage ? useRandomVoxels ? Random.Range(0f, 1f) * (database.VoxelCount() - 1) + 1 : voxelIndex : 0 : 0);
-        //             if(y > maxY) voxels[index] = 0;
-        //             index++;
-        //         }
-        //     }
-        // }
-
-        // for (int i = 0; i < voxels.Length; i++)
-        // {
-        //     int y = (i / size) % size;
-        //     voxels[i] = (byte)(y < maxY ? Random.Range(0f, 1f) > percentage ? useRandomVoxels ? Random.Range(0f, 1f) * (database.VoxelCount() - 1) + 1 : voxelIndex : 0 : 0);
-        // }
 
         GreedyMesher gm = new GreedyMesher(database, voxels, size, size, size);
         if (greedyMesh != null) greedyMesh.Clear();
@@ -110,6 +92,7 @@ public class ChunkCalculator : MonoBehaviour
     }
 
     private void CalculateChunk(){
+        int centerY = 0;
         for (int z = 0; z < size; z++)
         {
             for (int y = 0; y < size; y++)
@@ -124,11 +107,48 @@ public class ChunkCalculator : MonoBehaviour
                     if (y <= maxHeight)
                     {
                         if (y < 8) voxels[index] = (byte)1;
-                        else if (y < maxHeight) voxels[index] = (byte)2;
-                        else if (y <= maxHeight) voxels[index] = (byte)4;
+                        else if (y <= maxHeight) voxels[index] = (byte)2;
+                        
+                        if (y == maxHeight && y >= maxY) voxels[index] = (byte)4;
+
+                        if(x == 8 && z == 8 && y == maxHeight) centerY = y < maxY ? maxY : maxHeight;
                     }
-                    else if (y < 11) voxels[index] = (byte)3;
+                    else if (y <= maxY) voxels[index] = (byte)3;
                     else if (y == maxHeight + 1 && Random.Range(0f, 1f) > 0.75f) voxels[index] = (byte)5;
+                }
+            }
+        }
+
+        //Place tree
+        ApplyStructure(1, 1, 8, centerY, 8);
+    }
+
+    private void ApplyStructure(int id, int variantId, int centerX, int centerY, int centerZ)
+    {
+        JSONStructure structure = database.GetStructure(id);
+        if(structure == null) return;
+        StructureVariant variant = structure.GetVariant(variantId);
+        
+        for (int x = centerX - variant.center[0]; x < centerX - variant.center[0] + variant.width; x++)
+        {
+            for (int y = centerY - variant.center[1]; y < centerY - variant.center[1] + variant.height; y++)
+            {
+                for (int z = centerZ - variant.center[2]; z < centerZ - variant.center[2] + variant.depth; z++)
+                {
+                    int index = GetVoxel(x, y, z);
+                    if (index < 0) {  Debug.LogWarning("ChunkCalculator: Voxel not found"); continue; }
+
+                    // Target voxel        
+                    int localX = x - (centerX - variant.center[0]);
+                    int localY = y - (centerY - variant.center[1]);
+                    int localZ = z - (centerZ - variant.center[2]);            
+                    int target = localX + localY * variant.width + localZ * variant.width * variant.height;
+                    
+                    // Voxel
+                    byte voxel = (byte)variant.voxels[target];
+                    if (voxel == 0) continue;
+
+                    voxels[index] = voxel;
                 }
             }
         }

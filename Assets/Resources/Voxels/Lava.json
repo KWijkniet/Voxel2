@@ -2,23 +2,22 @@
     "id": 8,
     "type": "Liquid",
     "displayName": "Lava",
-    "folder": "lava",
     "textures": [
         {
-            "up": "0.png",
-            "down": "0.png",
-            "north": "0.png",
-            "south": "0.png",
-            "east": "0.png",
-            "west": "0.png"
+            "up": "lava/0.png",
+            "down": "lava/0.png",
+            "north": "lava/0.png",
+            "south": "lava/0.png",
+            "east": "lava/0.png",
+            "west": "lava/0.png"
         },
         {
-            "up": "1.png",
-            "down": "1.png",
-            "north": "1.png",
-            "south": "1.png",
-            "east": "1.png",
-            "west": "1.png"
+            "up": "lava/1.png",
+            "down": "lava/1.png",
+            "north": "lava/1.png",
+            "south": "lava/1.png",
+            "east": "lava/1.png",
+            "west": "lava/1.png"
         }
     ],
     "canGreedyMesh": true,

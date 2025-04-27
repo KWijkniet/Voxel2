@@ -107,7 +107,11 @@ public class GreedyMesher
         // Facing
         byte facingVoxel = GetVoxel(x + facing.x, y + facing.y, z + facing.z);
         JSONData facingData = database.GetVoxelData(facingVoxel);
-        if(facingVoxel != 0 && (facingData.isTransparent == voxelData.isTransparent && facingVoxel == voxelType && facingData.canGreedyMesh)){ return true;}
+        if (facingVoxel != 0) 
+        {
+            if (facingData.isTransparent == voxelData.isTransparent) { return true; } //  && facingVoxel == voxelType && facingData.canGreedyMesh
+            if (facingData.isTransparent != voxelData.isTransparent && voxelData.isTransparent) { return true; }
+        }
 
         return false;
     }
@@ -133,7 +137,11 @@ public class GreedyMesher
         // Facing
         byte facingVoxel = GetVoxel(x2 + facing.x, y2 + facing.y, z2 + facing.z);
         JSONData facingData = database.GetVoxelData(facingVoxel);
-        if(facingVoxel != 0 && (facingData.isTransparent == voxelData.isTransparent && facingData.canGreedyMesh)){ return false;}
+        if (facingVoxel != 0) 
+        {
+            if (facingData.isTransparent == voxelData.isTransparent && facingData.canGreedyMesh) { return false; }
+            if (facingData.isTransparent != voxelData.isTransparent && voxelData.isTransparent) { return false; }
+        }
 
         return true;
     }

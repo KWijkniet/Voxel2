@@ -2,47 +2,46 @@
     "id": 3,
     "type": "Liquid",
     "displayName": "Water",
-    "folder": "water",
     "textures": [
         {
-            "up": "0.png",
-            "down": "side.png",
-            "north": "side.png",
-            "south": "side.png",
-            "east": "side.png",
-            "west": "side.png"
+            "up": "water/0.png",
+            "down": "water/side.png",
+            "north": "water/side.png",
+            "south": "water/side.png",
+            "east": "water/side.png",
+            "west": "water/side.png"
         },
         {
-            "up": "1.png",
-            "down": "side.png",
-            "north": "side.png",
-            "south": "side.png",
-            "east": "side.png",
-            "west": "side.png"
+            "up": "water/1.png",
+            "down": "water/side.png",
+            "north": "water/side.png",
+            "south": "water/side.png",
+            "east": "water/side.png",
+            "west": "water/side.png"
         },
         {
-            "up": "2.png",
-            "down": "side.png",
-            "north": "side.png",
-            "south": "side.png",
-            "east": "side.png",
-            "west": "side.png"
+            "up": "water/2.png",
+            "down": "water/side.png",
+            "north": "water/side.png",
+            "south": "water/side.png",
+            "east": "water/side.png",
+            "west": "water/side.png"
         },
         {
-            "up": "3.png",
-            "down": "side.png",
-            "north": "side.png",
-            "south": "side.png",
-            "east": "side.png",
-            "west": "side.png"
+            "up": "water/3.png",
+            "down": "water/side.png",
+            "north": "water/side.png",
+            "south": "water/side.png",
+            "east": "water/side.png",
+            "west": "water/side.png"
         },
         {
-            "up": "4.png",
-            "down": "side.png",
-            "north": "side.png",
-            "south": "side.png",
-            "east": "side.png",
-            "west": "side.png"
+            "up": "water/4.png",
+            "down": "water/side.png",
+            "north": "water/side.png",
+            "south": "water/side.png",
+            "east": "water/side.png",
+            "west": "water/side.png"
         }
     ],
     "canGreedyMesh": true,
