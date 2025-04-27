@@ -1,16 +1,19 @@
 using UnityEngine;
 using Custom.Importer;
 
-[CreateAssetMenu(fileName = "New Database", menuName = "Custom/Database")]
-public class Database : ScriptableObject
+public class Database
 {
-    public int VoxelCount()
+    public static WorldController worldController;
+
+    private static Dictionary<Vector3, RegionController> regions;
+
+    public static int VoxelCount()
     {
         ImportController importController = ImportController.GetInstance();
         return importController.voxels.Count;
     }
 
-    public JSONData GetVoxelData(int index)
+    public static JSONData GetVoxelData(int index)
     {
         ImportController importController = ImportController.GetInstance();
         foreach (JSONData voxel in importController.voxels)
@@ -23,7 +26,7 @@ public class Database : ScriptableObject
         return null;
     }
 
-    public JSONStructure GetStructure(int index)
+    public static JSONStructure GetStructure(int index)
     {
         ImportController importController = ImportController.GetInstance();
         foreach (JSONStructure structure in importController.structures)
@@ -36,13 +39,13 @@ public class Database : ScriptableObject
         return null;
     }
 
-    public Texture2DArray GetTexture2DArray()
+    public static Texture2DArray GetTexture2DArray()
     {
         ImportController importController = ImportController.GetInstance();
         return importController.texture2DArray;
     }
 
-    public int GetTextureIndex(string path)
+    public static int GetTextureIndex(string path)
     {
         ImportController importController = ImportController.GetInstance();
         foreach (TextureData textureData in importController.textures)
@@ -57,15 +60,29 @@ public class Database : ScriptableObject
         return -1;
     }
 
-    public ComputeBuffer GetVoxelBuffer()
+    public static ComputeBuffer GetVoxelBuffer()
     {
         ImportController importController = ImportController.GetInstance();
         return importController.voxelBuffer;
     }
 
-    public void Import()
+    public static void Import()
     {
         ImportController importController = ImportController.GetInstance();
         importController.Import();
+    }
+
+    public static void RegisterRegion(Vector3 pos, RegionController region)
+    {
+        regions.add(pos, region);
+    }
+
+    public static RegionController GetRegion(Vector3 pos)
+    {
+        if (regions.has(pos))
+        {
+            return regions[pos];
+        }
+        return null;
     }
 }

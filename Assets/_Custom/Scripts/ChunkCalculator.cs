@@ -6,7 +6,6 @@ using Custom.Importer;
 [ExecuteInEditMode]
 public class ChunkCalculator : MonoBehaviour
 {
-    public Database database;
     public int size = 16;
     public int maxY = 8;
     public bool useGreedyMesh = false;
@@ -42,7 +41,7 @@ public class ChunkCalculator : MonoBehaviour
     public void Generate()
     {
         Clear();
-        if (database == null || database.VoxelCount() == 0 || (!useRandomVoxels && voxelIndex >= database.VoxelCount()))
+        if (Database.VoxelCount() == 0 || (!useRandomVoxels && voxelIndex >= Database.VoxelCount()))
         {
             Debug.LogError("Invalid database or voxel index");
             return;
@@ -51,12 +50,12 @@ public class ChunkCalculator : MonoBehaviour
         voxels = new byte[size*size*size];
         CalculateChunk();
 
-        GreedyMesher gm = new GreedyMesher(database, voxels, size, size, size);
+        GreedyMesher gm = new GreedyMesher(voxels, size, size, size);
         if (greedyMesh != null) greedyMesh.Clear();
         greedyMesh = gm.GenerateMesh();
 
         // Details
-        DetailMesher dm = new DetailMesher(database, voxels, size, size, size);
+        DetailMesher dm = new DetailMesher(voxels, size, size, size);
         if (detailMesh != null) detailMesh.Clear();
         detailMesh = dm.GenerateMesh();
     }
@@ -68,13 +67,13 @@ public class ChunkCalculator : MonoBehaviour
         if (detailMesh != null) detailMesh.Clear();
         detailMesh = null;
 
-        database.Import();
+        Database.Import();
         
         foreach (Material material in materials)
         {
             // Set the buffer and texture array to the material
-            material.SetBuffer("_VoxelBuffer", database.GetVoxelBuffer());
-            material.SetTexture("_MainTex", database.GetTexture2DArray());
+            material.SetBuffer("_VoxelBuffer", Database.GetVoxelBuffer());
+            material.SetTexture("_MainTex", Database.GetTexture2DArray());
         }
 
         renderParams = new List<RenderParams>();
@@ -100,7 +99,7 @@ public class ChunkCalculator : MonoBehaviour
                 for (int x = 0; x < size; x++)
                 {
                     int maxHeight = Mathf.RoundToInt(Mathf.PerlinNoise(x * 0.1f, z * 0.1f) * 16f);
-                    int index = GetVoxel(x, y, z);
+                    int index = Helpers.CoordinatesToIndex(x, y, z, size, size, size);
                     if (index < 0) Debug.LogWarning("ChunkCalculator: Voxel not found");
                     voxels[index] = 0;
 
@@ -125,7 +124,7 @@ public class ChunkCalculator : MonoBehaviour
 
     private void ApplyStructure(int id, int variantId, int centerX, int centerY, int centerZ)
     {
-        JSONStructure structure = database.GetStructure(id);
+        JSONStructure structure = Database.GetStructure(id);
         if(structure == null) return;
         StructureVariant variant = structure.GetVariant(variantId);
         
@@ -135,7 +134,7 @@ public class ChunkCalculator : MonoBehaviour
             {
                 for (int z = centerZ - variant.center[2]; z < centerZ - variant.center[2] + variant.depth; z++)
                 {
-                    int index = GetVoxel(x, y, z);
+                    int index = Helpers.CoordinatesToIndex(x, y, z, size, size, size);
                     if (index < 0) {  Debug.LogWarning("ChunkCalculator: Voxel not found"); continue; }
 
                     // Target voxel        
@@ -152,12 +151,5 @@ public class ChunkCalculator : MonoBehaviour
                 }
             }
         }
-    }
-
-    private int GetVoxel(int x, int y, int z)
-    {
-        if (x < 0 || x >= size || y < 0 || y >= size || z < 0 || z >= size)
-            return -1;
-        return x + y * size + z * size * size;
     }
 }

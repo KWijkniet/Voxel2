@@ -24,15 +24,13 @@ public class GreedyMeshData
 
 public class GreedyMesher
 {
-    private Database database;
     private byte[] voxelData;
     private int width, height, depth;
 
     private List<GreedyMeshData> meshData;
 
-    public GreedyMesher(Database database, byte[] voxelData, int width, int height, int depth)
+    public GreedyMesher(byte[] voxelData, int width, int height, int depth)
     {
-        this.database = database;
         this.voxelData = voxelData;
         this.width = width;
         this.height = height;
@@ -62,7 +60,7 @@ public class GreedyMesher
 
         foreach (GreedyMeshData data in meshData)
         {
-            JSONData voxelData = database.GetVoxelData(data.type);
+            JSONData voxelData = Database.GetVoxelData(data.type);
             MeshData target = voxelData.isTransparent ? transparentMeshData : solidMeshData;
 
             switch (voxelData.type)
@@ -95,22 +93,29 @@ public class GreedyMesher
 
     private bool ShouldSkip(int x, int y, int z, Vector3Int dir, Vector3Int facing, bool[] visited)
     {
-        if (visited[Helpers.CoordinatesToIndex(x, y, z, width)]){ return true;}
+        int visitedIndex = Helpers.CoordinatesToIndex(x, y, z, width);
+        if (visitedIndex == -1) return true;
+        if (visited[visitedIndex]) return true;
 
         // Current
-        byte voxelType = GetVoxel(x, y, z);
-        if (voxelType == 0){ return true;}
+        int voxelIndex = Helpers.CoordinatesToIndex(x, y, z, width, height, depth);
+        if (voxelIndex == -1) return true; 
+        byte voxelType = voxelData[voxelIndex];
+        if (voxelType == 0) return true;
 
-        JSONData voxelData = database.GetVoxelData(voxelType);
-        if (!voxelData.canGreedyMesh){ return true;}
+        JSONData jsonVoxel = Database.GetVoxelData(voxelType);
+        if (!jsonVoxel.canGreedyMesh) return true;
 
         // Facing
-        byte facingVoxel = GetVoxel(x + facing.x, y + facing.y, z + facing.z);
-        JSONData facingData = database.GetVoxelData(facingVoxel);
+        int facingIndex = Helpers.CoordinatesToIndex(x + facing.x, y + facing.y, z + facing.z, width, height, depth);
+        if (facingIndex == -1) return false;
+
+        byte facingVoxel = voxelData[facingIndex];
+        JSONData facingData = Database.GetVoxelData(facingVoxel);
         if (facingVoxel != 0) 
         {
-            if (facingData.isTransparent == voxelData.isTransparent) { return true; } //  && facingVoxel == voxelType && facingData.canGreedyMesh
-            if (facingData.isTransparent != voxelData.isTransparent && voxelData.isTransparent) { return true; }
+            if (facingData.isTransparent == jsonVoxel.isTransparent) { return true; } //  && facingVoxel == voxelType && facingData.canGreedyMesh
+            if (facingData.isTransparent != jsonVoxel.isTransparent && jsonVoxel.isTransparent) { return true; }
         }
 
         return false;
@@ -122,25 +127,34 @@ public class GreedyMesher
         if (visitedIndex >= 0 && visited[visitedIndex]) return false;
 
         // Current
-        byte voxelType = GetVoxel(x1, y1, z1);
-        JSONData voxelData = database.GetVoxelData(voxelType);
-        if (!voxelData.canGreedyMesh){ return false;}
+        int voxelIndex = Helpers.CoordinatesToIndex(x1, y1, z1, width, height, depth);
+        if (voxelIndex == -1) return false;
+
+        byte voxelType = voxelData[voxelIndex];
+        JSONData jsonVoxel = Database.GetVoxelData(voxelType);
+        if (!jsonVoxel.canGreedyMesh){ return false;}
 
         // Neighbour
-        byte neighbour = GetVoxel(x2, y2, z2);
+        int neighbourIndex = Helpers.CoordinatesToIndex(x2, y2, z2, width, height, depth);
+        if (voxelIndex == -1) return false;
+
+        byte neighbour = voxelData[neighbourIndex];
         if (neighbour == 0) return false;
         if (neighbour != voxelType) return false;
 
-        JSONData neighbourData = database.GetVoxelData(neighbour);
-        if(neighbourData.isTransparent != voxelData.isTransparent) return false;
+        JSONData neighbourData = Database.GetVoxelData(neighbour);
+        if(neighbourData.isTransparent != jsonVoxel.isTransparent) return false;
 
         // Facing
-        byte facingVoxel = GetVoxel(x2 + facing.x, y2 + facing.y, z2 + facing.z);
-        JSONData facingData = database.GetVoxelData(facingVoxel);
+        int facingIndex = Helpers.CoordinatesToIndex(x2 + facing.x, y2 + facing.y, z2 + facing.z, width, height, depth);
+        if (facingIndex == -1) return false;
+
+        byte facingVoxel = voxelData[facingIndex];
         if (facingVoxel != 0) 
         {
-            if (facingData.isTransparent == voxelData.isTransparent && facingData.canGreedyMesh) { return false; }
-            if (facingData.isTransparent != voxelData.isTransparent && voxelData.isTransparent) { return false; }
+            JSONData facingData = Database.GetVoxelData(facingVoxel);
+            if (facingData.isTransparent == jsonVoxel.isTransparent && facingData.canGreedyMesh) { return false; }
+            if (facingData.isTransparent != jsonVoxel.isTransparent && jsonVoxel.isTransparent) { return false; }
         }
 
         return true;
@@ -156,7 +170,10 @@ public class GreedyMesher
                 for (int x = 0; x < width; x++)
                 {
                     if (ShouldSkip(x, y, z, dir, facing, visited)) continue;
-                    visited[Helpers.CoordinatesToIndex(x, y, z, width)] = true;
+                    int currentIndex = Helpers.CoordinatesToIndex(x, y, z, width, height, depth);
+                    if (currentIndex == -1) continue;
+
+                    visited[currentIndex] = true;
 
                     int currWidth = 1;
                     int currHeight = 1;
@@ -165,7 +182,10 @@ public class GreedyMesher
                     bool isX = isY ? true : dir.x != 0;
                     while ((isX ? x : z) + currWidth < width && ValidNeighbour(x, y, z, x + (isX ? currWidth : 0), y, z + (!isX ? currWidth : 0), facing, visited))
                     {
-                        visited[Helpers.CoordinatesToIndex(x + (isX ? currWidth : 0), y, z + (!isX ? currWidth : 0), width)] = true;
+                        int visitedIndex = Helpers.CoordinatesToIndex(x + (isX ? currWidth : 0), y, z + (!isX ? currWidth : 0), width);
+                        if (visitedIndex == -1) break;
+
+                        visited[visitedIndex] = true;
                         currWidth++;
                     }
 
@@ -186,7 +206,10 @@ public class GreedyMesher
                             currHeight++;
                             for (int rx = (isX ? x : z); rx < (isX ? x : z) + currWidth; rx++)
                             {
-                                visited[Helpers.CoordinatesToIndex(!isX ? x : rx, !isY ? ry : y, !isY ? isX ? z : rx : ry, width)] = true;
+                                int visitedIndex = Helpers.CoordinatesToIndex(!isX ? x : rx, !isY ? ry : y, !isY ? isX ? z : rx : ry, width);
+                                if (visitedIndex == -1) break;
+                                
+                                visited[visitedIndex] = true;
                             }
                         }
                         else
@@ -195,17 +218,10 @@ public class GreedyMesher
                         }
                     }
 
-                    meshData.Add(new GreedyMeshData(x, y, z, currWidth, currHeight, facing, GetVoxel(x, y, z)));
+                    meshData.Add(new GreedyMeshData(x, y, z, currWidth, currHeight, facing, voxelData[currentIndex]));
                 }
             }
         }
-    }
-
-    private byte GetVoxel(int x, int y, int z)
-    {
-        if (x < 0 || x >= width || y < 0 || y >= height || z < 0 || z >= depth)
-            return 0;
-        return voxelData[x + y * width + z * width * height];
     }
 
     private void BuildVoxel(GreedyMeshData data, JSONData voxelData, MeshData target)
@@ -224,10 +240,10 @@ public class GreedyMesher
             target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, data.height, 1));
 
             // Add UVs with tiling
-            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 2));
-            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 2));
-            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 2));
-            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 2));
+            target.uvs.Add(new Vector3(0, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(0, vRepeat, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, vRepeat, voxelData.GetId()));
 
             for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[0, j]);
         }
@@ -243,10 +259,10 @@ public class GreedyMesher
             target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height, 0));
 
             // Add UVs with tiling
-            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 3));
-            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 3));
-            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 3));
-            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 3));
+            target.uvs.Add(new Vector3(0, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(0, vRepeat, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, vRepeat, voxelData.GetId()));
 
             for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[1, j]);
         }
@@ -262,10 +278,10 @@ public class GreedyMesher
             target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(1, data.height, data.width));
 
             // Add UVs with tiling
-            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 4));
-            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 4));
-            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 4));
-            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 4));
+            target.uvs.Add(new Vector3(0, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(0, vRepeat, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, vRepeat, voxelData.GetId()));
 
             for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[4, j]);
         }
@@ -281,10 +297,10 @@ public class GreedyMesher
             target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height, data.width));
 
             // Add UVs with tiling
-            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 5));
-            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 5));
-            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 5));
-            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 5));
+            target.uvs.Add(new Vector3(0, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(0, vRepeat, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, vRepeat, voxelData.GetId()));
 
             for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[5, j]);
         }
@@ -300,10 +316,10 @@ public class GreedyMesher
             target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 1, 0));
 
             // Add UVs with tiling
-            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 0));
-            target.uvs.Add(new Vector4(0, uRepeat, voxelData.GetId(), 0));
-            target.uvs.Add(new Vector4(vRepeat, 0, voxelData.GetId(), 0));
-            target.uvs.Add(new Vector4(vRepeat, uRepeat, voxelData.GetId(), 0));
+            target.uvs.Add(new Vector3(0, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(0, uRepeat, voxelData.GetId()));
+            target.uvs.Add(new Vector3(vRepeat, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(vRepeat, uRepeat, voxelData.GetId()));
 
             for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[2, j]);
         }
@@ -319,10 +335,10 @@ public class GreedyMesher
             target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 0, 0));
 
             // Add UVs with tiling
-            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 1));
-            target.uvs.Add(new Vector4(vRepeat, 0, voxelData.GetId(), 1));
-            target.uvs.Add(new Vector4(0, uRepeat, voxelData.GetId(), 1));
-            target.uvs.Add(new Vector4(vRepeat, uRepeat, voxelData.GetId(), 1));
+            target.uvs.Add(new Vector3(0, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(vRepeat, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(0, uRepeat, voxelData.GetId()));
+            target.uvs.Add(new Vector3(vRepeat, uRepeat, voxelData.GetId()));
 
             for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[3, j]);
         }
@@ -345,10 +361,10 @@ public class GreedyMesher
             target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, data.height - liquidOffset, 1));
 
             // Add UVs with tiling
-            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 2));
-            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 2));
-            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 2));
-            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 2));
+            target.uvs.Add(new Vector3(0, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(0, vRepeat, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, vRepeat, voxelData.GetId()));
 
             for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[0, j]);
         }
@@ -364,10 +380,10 @@ public class GreedyMesher
             target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height - liquidOffset, 0));
 
             // Add UVs with tiling
-            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 3));
-            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 3));
-            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 3));
-            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 3));
+            target.uvs.Add(new Vector3(0, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(0, vRepeat, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, vRepeat, voxelData.GetId()));
 
             for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[1, j]);
         }
@@ -383,10 +399,10 @@ public class GreedyMesher
             target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(1, data.height - liquidOffset, data.width));
 
             // Add UVs with tiling
-            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 4));
-            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 4));
-            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 4));
-            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 4));
+            target.uvs.Add(new Vector3(0, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(0, vRepeat, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, vRepeat, voxelData.GetId()));
 
             for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[4, j]);
         }
@@ -402,10 +418,10 @@ public class GreedyMesher
             target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(0, data.height - liquidOffset, data.width));
 
             // Add UVs with tiling
-            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 5));
-            target.uvs.Add(new Vector4(uRepeat, 0, voxelData.GetId(), 5));
-            target.uvs.Add(new Vector4(0, vRepeat, voxelData.GetId(), 5));
-            target.uvs.Add(new Vector4(uRepeat, vRepeat, voxelData.GetId(), 5));
+            target.uvs.Add(new Vector3(0, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(0, vRepeat, voxelData.GetId()));
+            target.uvs.Add(new Vector3(uRepeat, vRepeat, voxelData.GetId()));
 
             for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[5, j]);
         }
@@ -421,10 +437,10 @@ public class GreedyMesher
             target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 1 - liquidOffset, 0));
 
             // Add UVs with tiling
-            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 0));
-            target.uvs.Add(new Vector4(0, uRepeat, voxelData.GetId(), 0));
-            target.uvs.Add(new Vector4(vRepeat, 0, voxelData.GetId(), 0));
-            target.uvs.Add(new Vector4(vRepeat, uRepeat, voxelData.GetId(), 0));
+            target.uvs.Add(new Vector3(0, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(0, uRepeat, voxelData.GetId()));
+            target.uvs.Add(new Vector3(vRepeat, 0, voxelData.GetId()));
+            target.uvs.Add(new Vector3(vRepeat, uRepeat, voxelData.GetId()));
 
             for (int j = 0; j < 6; j++) target.triangles.Add(vertexIndex + faceTriangles[2, j]);
         }
@@ -440,7 +456,7 @@ public class GreedyMesher
             target.vertices.Add(new Vector3(data.x, data.y, data.z) + new Vector3(data.width, 0, 0));
 
             // Add UVs with tiling
-            target.uvs.Add(new Vector4(0, 0, voxelData.GetId(), 1));
+            target.uvs.Add(new Vector3(0, 0, voxelData.GetId()));
             target.uvs.Add(new Vector4(vRepeat, 0, voxelData.GetId(), 1));
             target.uvs.Add(new Vector4(0, uRepeat, voxelData.GetId(), 1));
             target.uvs.Add(new Vector4(vRepeat, uRepeat, voxelData.GetId(), 1));

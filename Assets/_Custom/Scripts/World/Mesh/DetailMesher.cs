@@ -24,15 +24,13 @@ public class DetailMeshData
 
 public class DetailMesher
 {
-    private Database database;
     private byte[] voxelData;
     private int width, height, depth;
 
     private List<DetailMeshData> meshData;
 
-    public DetailMesher(Database database, byte[] voxelData, int width, int height, int depth)
+    public DetailMesher(byte[] voxelData, int width, int height, int depth)
     {
-        this.database = database;
         this.voxelData = voxelData;
         this.width = width;
         this.height = height;
@@ -53,8 +51,11 @@ public class DetailMesher
             {
                 for (int x = 0; x < width; x++)
                 {
-                    byte voxel = GetVoxel(x, y, z);
-                    JSONData data = database.GetVoxelData(voxel);
+                    int currentVoxel = Helpers.CoordinatesToIndex(x, y, z, width, height, depth);
+                    if (currentVoxel == -1) continue;
+
+                    byte voxel = voxelData[currentVoxel];
+                    JSONData data = Database.GetVoxelData(voxel);
                     MeshData target = data.isTransparent ? transparentMeshData : solidMeshData;
                     DetailMeshData detailMeshData = new DetailMeshData(x, y, z, 1, 1, Vector3Int.zero, voxel);
 
@@ -84,13 +85,6 @@ public class DetailMesher
         mesh.Optimize();
 
         return mesh;
-    }
-
-    private byte GetVoxel(int x, int y, int z)
-    {
-        if (x < 0 || x >= width || y < 0 || y >= height || z < 0 || z >= depth)
-            return 0;
-        return voxelData[x + y * width + z * width * height];
     }
 
     private void BuildQuad(DetailMeshData data, JSONData voxelData, MeshData target)
