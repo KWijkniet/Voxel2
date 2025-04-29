@@ -1,11 +1,10 @@
 using UnityEngine;
 using Custom.Importer;
+using System.Collections.Generic;
 
 public class Database
 {
     public static WorldController worldController;
-
-    private static Dictionary<Vector3, RegionController> regions;
 
     public static int VoxelCount()
     {
@@ -72,17 +71,13 @@ public class Database
         importController.Import();
     }
 
-    public static void RegisterRegion(Vector3 pos, RegionController region)
-    {
-        regions.add(pos, region);
-    }
+    // public static void RegisterRegion(Vector3 pos, Region region)
+    // {
+    //     worldController.AddRegion(pos, region);
+    // }
 
-    public static RegionController GetRegion(Vector3 pos)
-    {
-        if (regions.has(pos))
-        {
-            return regions[pos];
-        }
-        return null;
-    }
+    // public static Region GetRegion(Vector3 pos)
+    // {
+    //     return worldController.GetRegion(pos);
+    // }
 }

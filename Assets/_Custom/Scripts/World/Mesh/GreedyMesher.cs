@@ -93,7 +93,7 @@ public class GreedyMesher
 
     private bool ShouldSkip(int x, int y, int z, Vector3Int dir, Vector3Int facing, bool[] visited)
     {
-        int visitedIndex = Helpers.CoordinatesToIndex(x, y, z, width);
+        int visitedIndex = Helpers.CoordinatesToIndex(x, y, z, width, height, depth);
         if (visitedIndex == -1) return true;
         if (visited[visitedIndex]) return true;
 
@@ -123,7 +123,7 @@ public class GreedyMesher
 
     private bool ValidNeighbour(int x1, int y1, int z1, int x2, int y2, int z2, Vector3Int facing, bool[] visited)
     {
-        int visitedIndex = Helpers.CoordinatesToIndex(x2, y2, z2, width);
+        int visitedIndex = Helpers.CoordinatesToIndex(x2, y2, z2, width, height, depth);
         if (visitedIndex >= 0 && visited[visitedIndex]) return false;
 
         // Current
@@ -147,14 +147,15 @@ public class GreedyMesher
 
         // Facing
         int facingIndex = Helpers.CoordinatesToIndex(x2 + facing.x, y2 + facing.y, z2 + facing.z, width, height, depth);
-        if (facingIndex == -1) return false;
-
-        byte facingVoxel = voxelData[facingIndex];
-        if (facingVoxel != 0) 
+        if (facingIndex >= 0)
         {
-            JSONData facingData = Database.GetVoxelData(facingVoxel);
-            if (facingData.isTransparent == jsonVoxel.isTransparent && facingData.canGreedyMesh) { return false; }
-            if (facingData.isTransparent != jsonVoxel.isTransparent && jsonVoxel.isTransparent) { return false; }
+            byte facingVoxel = voxelData[facingIndex];
+            if (facingVoxel != 0) 
+            {
+                JSONData facingData = Database.GetVoxelData(facingVoxel);
+                if (facingData.isTransparent == jsonVoxel.isTransparent && facingData.canGreedyMesh) { return false; }
+                if (facingData.isTransparent != jsonVoxel.isTransparent && jsonVoxel.isTransparent) { return false; }
+            }
         }
 
         return true;
@@ -182,7 +183,7 @@ public class GreedyMesher
                     bool isX = isY ? true : dir.x != 0;
                     while ((isX ? x : z) + currWidth < width && ValidNeighbour(x, y, z, x + (isX ? currWidth : 0), y, z + (!isX ? currWidth : 0), facing, visited))
                     {
-                        int visitedIndex = Helpers.CoordinatesToIndex(x + (isX ? currWidth : 0), y, z + (!isX ? currWidth : 0), width);
+                        int visitedIndex = Helpers.CoordinatesToIndex(x + (isX ? currWidth : 0), y, z + (!isX ? currWidth : 0), width, height, depth);
                         if (visitedIndex == -1) break;
 
                         visited[visitedIndex] = true;
@@ -206,7 +207,7 @@ public class GreedyMesher
                             currHeight++;
                             for (int rx = (isX ? x : z); rx < (isX ? x : z) + currWidth; rx++)
                             {
-                                int visitedIndex = Helpers.CoordinatesToIndex(!isX ? x : rx, !isY ? ry : y, !isY ? isX ? z : rx : ry, width);
+                                int visitedIndex = Helpers.CoordinatesToIndex(!isX ? x : rx, !isY ? ry : y, !isY ? isX ? z : rx : ry, width, height, depth);
                                 if (visitedIndex == -1) break;
                                 
                                 visited[visitedIndex] = true;
