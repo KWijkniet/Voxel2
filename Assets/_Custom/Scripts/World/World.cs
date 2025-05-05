@@ -158,6 +158,7 @@ public class WorldChunk
 
     private async void Calculating()
     {
+        if (status == Status.Calculated || status == Status.Ready) return;
         if (status != Status.None) return;
 
         status = Status.Calculating;
