@@ -1,3 +1,5 @@
+using System;
+using System.Threading.Tasks;
 using UnityEngine;
 
 public class Helpers
@@ -15,5 +17,10 @@ public class Helpers
         int x = index / (width * height); // Z-coordinate
         
         return new Vector3Int(x, y, z);
+    }
+
+    public static async Task Sleep(float delay)
+    {
+        await Task.Delay(TimeSpan.FromSeconds(delay));
     }
 }
