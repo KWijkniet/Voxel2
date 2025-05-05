@@ -1235,7 +1235,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   chunkSize: {x: 16, y: 16, z: 16}
-  renderDistance: 1
+  calculateDistance: 6
+  renderDistance: 5
   maxHeight: 256
 --- !u!1 &2040203235
 GameObject:
