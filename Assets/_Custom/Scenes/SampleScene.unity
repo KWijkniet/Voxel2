@@ -307,16 +307,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 519a95f5a354062458afa34880d6fdb4, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  width: 16
-  height: 16
-  depth: 16
-  worldHeight: 256
-  waterLevel: 128
-  renderDistance: 2
-  materials:
-  - {fileID: 2100000, guid: 977ab5072397ac04991064951693255d, type: 2}
-  - {fileID: 2100000, guid: e2ca607e4b0f3534a8746de07942d2e4, type: 2}
-  - {fileID: 2100000, guid: 2d8e38f8a77699e4a93767920037dc44, type: 2}
 --- !u!4 &293482926
 Transform:
   m_ObjectHideFlags: 0
