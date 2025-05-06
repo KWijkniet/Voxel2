@@ -1228,6 +1228,10 @@ MonoBehaviour:
   calculateDistance: 6
   renderDistance: 5
   maxHeight: 256
+  materials:
+  - {fileID: 2100000, guid: 977ab5072397ac04991064951693255d, type: 2}
+  - {fileID: 2100000, guid: e2ca607e4b0f3534a8746de07942d2e4, type: 2}
+  - {fileID: 2100000, guid: 2d8e38f8a77699e4a93767920037dc44, type: 2}
 --- !u!1 &2040203235
 GameObject:
   m_ObjectHideFlags: 0

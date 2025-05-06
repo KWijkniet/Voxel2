@@ -4,10 +4,13 @@ using System.Collections;
 
 public class World : MonoBehaviour
 {
+    public static List<RenderParams> renderParams;
+
     [SerializeField] private Vector3Int chunkSize = new Vector3Int(16, 16, 16);
     [SerializeField] private int calculateDistance = 2;
     [SerializeField] private int renderDistance = 1;
     [SerializeField] private int maxHeight = 255;
+    [SerializeField] private List<Material> materials;
 
     private List<Vector2Int> columnLoadQueue = new List<Vector2Int>();
     private Coroutine loadRoutine;
@@ -16,6 +19,31 @@ public class World : MonoBehaviour
     private HashSet<Vector2Int> currentCalcRange = new HashSet<Vector2Int>();
     private List<Vector2Int> insideRenderRange = new List<Vector2Int>();
     private ObjectPool<Chunk> chunkPool = new ObjectPool<Chunk>();
+
+    private void Awake()
+    {
+        Database.Import();
+
+        foreach (Material material in materials)
+        {
+            // Set the buffer and texture array to the material
+            material.SetBuffer("_VoxelBuffer", Database.GetVoxelBuffer());
+            material.SetTexture("_MainTex", Database.GetTexture2DArray());
+        }
+
+        renderParams = new List<RenderParams>();
+        for (int i = 0; i < materials.Count; i++)
+        {
+            RenderParams renderParam = new RenderParams(materials[i]);
+            renderParam.instanceID = gameObject.GetInstanceID();
+            renderParam.layer = 1;
+            renderParam.receiveShadows = true;
+            renderParam.renderingLayerMask = 1;
+            renderParam.rendererPriority = 1;
+            renderParam.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+            renderParams.Add(renderParam);
+        }
+    }
 
     private void Update()
     {

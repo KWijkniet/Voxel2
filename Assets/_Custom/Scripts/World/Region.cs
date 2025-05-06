@@ -42,7 +42,6 @@ public class Region
     private NativeArray<float> heightmap;
     private JobHandle heightmapJobHandle;
     private bool heightmapScheduled;
-    private bool heightmapReady;
 
     private Dictionary<int, Chunk> chunks = new();
     private ObjectPool<Chunk> pool;
@@ -91,7 +90,6 @@ public class Region
         {
             heightmapJobHandle.Complete();
             heightmapScheduled = false;
-            heightmapReady = true;
 
             GenerateChunksFromHeightmap();
             heightmap.Dispose();
