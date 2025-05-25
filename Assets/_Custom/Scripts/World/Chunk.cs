@@ -21,13 +21,15 @@ public struct MeshBuffers
 {
     public NativeList<float3> Vertices;
     public NativeList<int> Triangles;
-    public NativeList<float2> UVs;
+    public NativeList<float3> UVs;
+    public Allocator allocator;
 
     public MeshBuffers(Allocator allocator)
     {
+        this.allocator = allocator;
         Vertices = new NativeList<float3>(allocator);
         Triangles = new NativeList<int>(allocator);
-        UVs = new NativeList<float2>(allocator);
+        UVs = new NativeList<float3>(allocator);
     }
 
     public void Dispose()
@@ -41,9 +43,9 @@ public struct MeshBuffers
 [BurstCompile]
 public struct ChunkCalculateJob : IJob
 {
-    public int chunkYBase; // World Y position of the chunk
-    public int3 chunkSize; // Dimensions of the chunk
-    public int2 heightmapResolution; // Resolution of heightmap (X × Z)
+    [ReadOnly] public int chunkYBase; // World Y position of the chunk
+    [ReadOnly] public int3 chunkSize; // Dimensions of the chunk
+    [ReadOnly] public int2 heightmapResolution; // Resolution of heightmap (X × Z)
     [ReadOnly] public NativeArray<float> heightmap;
     public NativeArray<byte> voxelData; // Output voxel data (0 = air, 1 = stone)
 
@@ -75,58 +77,14 @@ public struct ChunkCalculateJob : IJob
 public struct ChunkRenderJob : IJob
 {
     [ReadOnly] public NativeArray<byte> voxelData;
-    public int3 chunkSize;
-
-    public MeshBuffers greedySolid;
-    public MeshBuffers greedyTransparent;
-
-    public MeshBuffers detailsSolid;
-    public MeshBuffers detailsTransparent;
-
+    [ReadOnly] public int3 chunkSize;
+    [ReadOnly] public float3 chunkPos;
+    public MeshBuffers meshBuffer;
 
     public void Execute()
     {
-
-        // EXAMPLE
-        //int width = chunkSize.x;
-        //int height = chunkSize.y;
-        //int depth = chunkSize.z;
-
-        //for (int z = 0; z < depth; z++)
-        //{
-        //    for (int y = 0; y < height; y++)
-        //    {
-        //        for (int x = 0; x < width; x++)
-        //        {
-        //            int index = x + y * width + z * width * height;
-        //            byte voxel = voxelData[index];
-
-        //            int meshIndex = GetMeshType(voxel);
-        //            var mesh = meshBuffers[meshIndex];
-
-        //            // Dummy face (1 quad)
-        //            float3 pos = new float3(x, y, z);
-        //            int vertIndex = mesh.Vertices.Length;
-
-        //            mesh.Vertices.Add(pos + new float3(0, 0, 0));
-        //            mesh.Vertices.Add(pos + new float3(1, 0, 0));
-        //            mesh.Vertices.Add(pos + new float3(1, 1, 0));
-        //            mesh.Vertices.Add(pos + new float3(0, 1, 0));
-
-        //            mesh.UVs.Add(new float2(0, 0));
-        //            mesh.UVs.Add(new float2(1, 0));
-        //            mesh.UVs.Add(new float2(1, 1));
-        //            mesh.UVs.Add(new float2(0, 1));
-
-        //            mesh.Triangles.Add(vertIndex + 0);
-        //            mesh.Triangles.Add(vertIndex + 2);
-        //            mesh.Triangles.Add(vertIndex + 1);
-        //            mesh.Triangles.Add(vertIndex + 0);
-        //            mesh.Triangles.Add(vertIndex + 3);
-        //            mesh.Triangles.Add(vertIndex + 2);
-        //        }
-        //    }
-        //}
+        GreedyMesherThreat gm = new(voxelData, chunkSize.x, chunkSize.y, chunkSize.z, chunkPos);
+        meshBuffer = gm.GenerateMesh(meshBuffer, false);
     }
 }
 
@@ -136,8 +94,13 @@ public class Chunk
     public Vector3Int chunkSize;
     public Status status = Status.None;
 
+    public bool hasCalculated = false;
+    public bool hasGenerated = false;
+    public bool isEmpty = true;
+    public bool isFull = true;
+
     private JobHandle calcHandle;
-    private JobHandle renderHandle;
+    private NativeArray<JobHandle> renderHandle;
     private bool jobScheduled = false;
 
     private NativeArray<float> heightmap;
@@ -179,52 +142,114 @@ public class Chunk
         {
             calcHandle.Complete();
             status = Status.Calculated;
+            hasCalculated = true;
             heightmap.Dispose();
             jobScheduled = false;
+
+            foreach (var item in voxelData)
+            {
+                if (item != 0)
+                {
+                    isEmpty = false;
+                    break;
+                }
+            }
+
+            foreach (var item in voxelData)
+            {
+                if (item == 0)
+                {
+                    isFull = false;
+                    break;
+                }
+            }
+
+            if (isEmpty)
+            {
+                status = Status.Ready;
+            }
         }
         else if (status == Status.Calculated && !jobScheduled)
         {
-            meshBufferArray[0] = new MeshBuffers(Allocator.Persistent); // Mesh 0
-            meshBufferArray[1] = new MeshBuffers(Allocator.Persistent); // Mesh 1
-            meshBufferArray[2] = new MeshBuffers(Allocator.Persistent); // Mesh 0
-            meshBufferArray[3] = new MeshBuffers(Allocator.Persistent); // Mesh 1
 
-            var renderJob = new ChunkRenderJob
+            // Ensure renderHandle is not already allocated or disposed
+            if (renderHandle.IsCreated)
+                renderHandle.Dispose();
+
+            // Ensure the surrounding chunks have been calculated
+            if (
+                World.Instance.GetChunk((int)pos.x + 1, (int)pos.y, (int)pos.z).hasCalculated != true ||
+                World.Instance.GetChunk((int)pos.x - 1, (int)pos.y, (int)pos.z).hasCalculated != true ||
+                World.Instance.GetChunk((int)pos.x, (int)pos.y, (int)pos.z + 1).hasCalculated != true ||
+                World.Instance.GetChunk((int)pos.x, (int)pos.y, (int)pos.z - 1).hasCalculated != true ||
+                World.Instance.GetChunk((int)pos.x, (int)pos.y + 1, (int)pos.z).hasCalculated != true ||
+                World.Instance.GetChunk((int)pos.x, (int)pos.y - 1, (int)pos.z).hasCalculated != true
+                )
+            {
+                return;
+            }
+
+            renderHandle = new NativeArray<JobHandle>(4, Allocator.TempJob); // Allocate per use!
+
+            for (int i = 0; i < 4; i++)
+            {
+                meshBufferArray[i] = new MeshBuffers(Allocator.Persistent);
+            }
+
+            renderHandle[0] = new ChunkRenderJob
             {
                 voxelData = voxelData,
+                chunkPos = pos,
                 chunkSize = new int3(chunkSize.x, chunkSize.y, chunkSize.z),
-                greedySolid = meshBufferArray[0],
-                greedyTransparent = meshBufferArray[1],
-                detailsSolid = meshBufferArray[2],
-                detailsTransparent = meshBufferArray[3],
-            };
-            renderHandle = renderJob.Schedule();
+                meshBuffer = meshBufferArray[0]
+            }.Schedule();
+
+            renderHandle[1] = new ChunkRenderJob
+            {
+                voxelData = voxelData,
+                chunkPos = pos,
+                chunkSize = new int3(chunkSize.x, chunkSize.y, chunkSize.z),
+                meshBuffer = meshBufferArray[1]
+            }.Schedule();
+
+            renderHandle[2] = new ChunkRenderJob
+            {
+                voxelData = voxelData,
+                chunkPos = pos,
+                chunkSize = new int3(chunkSize.x, chunkSize.y, chunkSize.z),
+                meshBuffer = meshBufferArray[2]
+            }.Schedule();
+
+            renderHandle[3] = new ChunkRenderJob
+            {
+                voxelData = voxelData,
+                chunkPos = pos,
+                chunkSize = new int3(chunkSize.x, chunkSize.y, chunkSize.z),
+                meshBuffer = meshBufferArray[3]
+            }.Schedule();
+
             jobScheduled = true;
             status = Status.Rendering;
         }
-        else if (status == Status.Rendering && renderHandle.IsCompleted)
+        else if (status == Status.Rendering && renderHandle.IsCreated)
         {
-            renderHandle.Complete();
-            status = Status.Ready;
+            if (JobHandle.CombineDependencies(renderHandle).IsCompleted)
+            {
+                JobHandle.CompleteAll(renderHandle);
+                status = Status.Ready;
+                hasGenerated = true;
 
-            meshes.Add(Helpers.ConvertToMesh("Greedy", meshBufferArray[0], meshBufferArray[1]));
-            meshes.Add(Helpers.ConvertToMesh("Details", meshBufferArray[2], meshBufferArray[3]));
+                meshes.Add(Helpers.ConvertToMesh("Greedy", meshBufferArray[0], meshBufferArray[1]));
+                meshes.Add(Helpers.ConvertToMesh("Details", meshBufferArray[2], meshBufferArray[3]));
+
+                renderHandle.Dispose();
+            }
         }
     }
 
     public void Draw()
     {
-        Color color = status switch
-        {
-            Status.None => Color.black,
-            Status.Calculating or Status.Rendering or Status.Updating => Color.red,
-            Status.Ready => Color.green,
-            _ => Color.white
-        };
-        Gizmos.color = color;
-        Gizmos.DrawWireCube(pos + (chunkSize / 2), chunkSize);
-
-        if(meshes.Count > 0)
+        if (meshes.Count > 0)
         {
             int index = 0;
             foreach (Mesh mesh in meshes)
@@ -235,6 +260,24 @@ public class Chunk
                 index++;
             }
         }
+    }
+
+    public void DrawGizmos()
+    {
+        Color color = status switch
+        {
+            Status.None => Color.black,
+            Status.Calculating or Status.Rendering or Status.Updating => Color.red,
+            Status.Ready => Color.green,
+            _ => Color.white
+        };
+        Gizmos.color = color;
+        Gizmos.DrawWireCube(pos + (chunkSize / 2), chunkSize);
+    }
+
+    public NativeArray<byte> GetVoxelData()
+    {
+        return voxelData;
     }
 
     public void Reset()

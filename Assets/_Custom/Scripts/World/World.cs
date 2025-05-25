@@ -4,6 +4,7 @@ using System.Collections;
 
 public class World : MonoBehaviour
 {
+    public static World Instance;
     public static List<RenderParams> renderParams;
 
     [SerializeField] private Vector3Int chunkSize = new Vector3Int(16, 16, 16);
@@ -11,6 +12,7 @@ public class World : MonoBehaviour
     [SerializeField] private int renderDistance = 1;
     [SerializeField] private int maxHeight = 255;
     [SerializeField] private List<Material> materials;
+    [SerializeField] private bool showChunks = true;
 
     private List<Vector2Int> columnLoadQueue = new List<Vector2Int>();
     private Coroutine loadRoutine;
@@ -22,6 +24,7 @@ public class World : MonoBehaviour
 
     private void Awake()
     {
+        Instance = this;
         Database.Import();
 
         foreach (Material material in materials)
@@ -88,6 +91,16 @@ public class World : MonoBehaviour
             insideRenderRange.Clear();
             insideRenderRange.AddRange(GetGridPositionsAround(gridPos, renderDistance));
         }
+
+        foreach (var pos in insideRenderRange)
+        {
+            if (columns.TryGetValue(pos, out var column))
+            {
+                column.Update();
+                column.UpdateChunks();
+                column.Draw(gridPos.y, renderDistance);
+            }
+        }
     }
 
     private IEnumerator ProcessColumnLoadQueue()
@@ -100,7 +113,7 @@ public class World : MonoBehaviour
             return distA.CompareTo(distB);
         });
 
-        int batchSize = 4;
+        int batchSize = 20;
         int processed = 0;
 
         while (columnLoadQueue.Count > 0)
@@ -154,16 +167,37 @@ public class World : MonoBehaviour
 
     private void OnDrawGizmos()
     {
+        if (!showChunks) return;
         var gridPos = RoundDownToInterval(Vector3Int.FloorToInt(lastPos), chunkSize);
 
         foreach (var pos in insideRenderRange)
         {
             if (columns.TryGetValue(pos, out var column))
             {
-                column.Update();
-                column.UpdateChunks();
-                column.Draw(gridPos.y, renderDistance);
+                column.DrawGizmos(gridPos.y, renderDistance);
             }
         }
+    }
+
+    public Chunk GetChunk(int x, int y, int z)
+    {
+        var gridPos = RoundDownToInterval(Vector3Int.FloorToInt(transform.position), chunkSize);
+        Vector2Int pos = new Vector2Int(gridPos.x, gridPos.z);
+        if (columns.ContainsKey(pos))
+        {
+            return columns[pos].GetChunk(gridPos.y);
+        }
+        return null;
+    }
+
+    public Chunk GetChunkThread(int x, int y, int z)
+    {
+        var gridPos = RoundDownToInterval(new Vector3(x,y,z), chunkSize);
+        Vector2Int pos = new Vector2Int(gridPos.x, gridPos.z);
+        if (columns.ContainsKey(pos))
+        {
+            return columns[pos].GetChunk(gridPos.y);
+        }
+        return null;
     }
 }

@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
+using Unity.Collections;
+using Unity.Mathematics;
 using UnityEngine;
 
 public class Helpers
@@ -38,7 +41,7 @@ public class Helpers
 
         // Merge vertices and uvs
         var vertices = new Vector3[solidVertCount + transVertCount];
-        var uvs = new Vector2[vertices.Length];
+        var uvs = new Vector3[vertices.Length];
 
         for (int i = 0; i < solidVertCount; i++)
         {
@@ -66,11 +69,31 @@ public class Helpers
         mesh.vertices = vertices;
         mesh.SetTriangles(solidTriangles, 0);
         mesh.SetTriangles(transparentTriangles, 1);
-        mesh.uv = uvs;
+        mesh.SetUVs(0, uvs);
 
         mesh.RecalculateNormals();
         mesh.RecalculateBounds();
 
         return mesh;
+    }
+
+    public static NativeList<int> ConvertToNativeList(List<int> intList, Allocator allocator)
+    {
+        var nativeList = new NativeList<int>(intList.Count, allocator);
+        foreach (var i in intList)
+        {
+            nativeList.Add(i);
+        }
+        return nativeList;
+    }
+
+    public static NativeList<float3> ConvertToNativeList(List<Vector3> vectorList, Allocator allocator)
+    {
+        var nativeList = new NativeList<float3>(vectorList.Count, allocator);
+        foreach (var v in vectorList)
+        {
+            nativeList.Add(new float3(v.x, v.y, v.z));
+        }
+        return nativeList;
     }
 }

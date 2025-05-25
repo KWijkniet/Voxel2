@@ -4,6 +4,7 @@ using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
 using UnityEngine;
+using UnityEngine.UIElements;
 
 [BurstCompile]
 public struct HeightmapGenerationJob : IJob
@@ -12,6 +13,7 @@ public struct HeightmapGenerationJob : IJob
     public int2 resolution;
     public float frequency;
     public float amplitude;
+    public float offset;
 
     public NativeArray<float> heightmap;
 
@@ -26,7 +28,7 @@ public struct HeightmapGenerationJob : IJob
                     (columnOrigin.y + z) * frequency
                 );
 
-                float height = noise.cnoise(samplePos) * amplitude;
+                float height = noise.cnoise(samplePos) * amplitude + offset;
                 heightmap[x + z * resolution.x] = height;
             }
         }
@@ -65,8 +67,9 @@ public class Region
         {
             columnOrigin = new int2(pos.x, pos.z),
             resolution = resolution,
-            frequency = 0.05f,
-            amplitude = maxHeight,
+            frequency = 0.01f,
+            amplitude = maxHeight / 8,
+            offset = maxHeight / 2,
             heightmap = heightmap
         };
 
@@ -100,10 +103,23 @@ public class Region
     {
         foreach (var kvp in chunks)
         {
-            if (Mathf.Abs(kvp.Key - playerY) <= chunkSize.y * distance)
-            {
-                kvp.Value.Draw();
-            }
+            kvp.Value.Draw();
+            //if (Mathf.Abs(kvp.Key - playerY) <= chunkSize.y * distance)
+            //{
+            //    kvp.Value.Draw();
+            //}
+        }
+    }
+
+    public void DrawGizmos(int playerY, int distance)
+    {
+        foreach (var kvp in chunks)
+        {
+            kvp.Value.DrawGizmos();
+            //if (Mathf.Abs(kvp.Key - playerY) <= chunkSize.y * distance)
+            //{
+            //    kvp.Value.DrawGizmos();
+            //}
         }
     }
 
@@ -123,5 +139,14 @@ public class Region
             pool.Return(chunk);
         }
         chunks.Clear();
+    }
+
+    public Chunk GetChunk(int y)
+    {
+        if (chunks.ContainsKey(y))
+        {
+            return chunks[y];
+        }
+        return null;
     }
 }
