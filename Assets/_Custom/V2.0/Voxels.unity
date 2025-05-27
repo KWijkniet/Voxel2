@@ -271,8 +271,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   mat: {fileID: 2100000, guid: dafd5d8c02a675f48bc4c10fdb3744d0, type: 2}
   showDebug: 0
-  chunksX: 5
-  chunksZ: 5
+  chunksX: 1
+  chunksZ: 1
 --- !u!4 &1543898812
 Transform:
   m_ObjectHideFlags: 0

@@ -122,6 +122,7 @@ namespace Custom.Voxels
 
                 // Assign to mesh
                 mesh.Clear();
+                Debug.Log("Mesh Size: " + vertices.Length + ", " + triangles.Length + ", " + uvs.Length);
                 //mesh.subMeshCount = 2;
                 mesh.vertices = MeshHelper.NativeToVector3(vertices);
                 mesh.SetTriangles(MeshHelper.NativeToInt(triangles), 0);

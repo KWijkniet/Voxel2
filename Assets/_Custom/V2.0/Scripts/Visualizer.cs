@@ -16,6 +16,7 @@ namespace Custom.Voxels
 
         private void Start()
         {
+            Database database = new Database();
             WorldSettings.RENDERPARAMS = new RenderParams(mat)
             {
                 instanceID = 0,
