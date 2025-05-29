@@ -4,6 +4,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading.Tasks;
+using Unity.Collections;
 using Unity.Mathematics;
 using UnityEngine;
 
@@ -27,6 +28,18 @@ namespace Custom.Voxels.Helpers
             int y = yz / size.z;
             int z = yz % size.z;
             return new int3(x, y, z);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Vector3 Float3ToVector3(float3 value)
+        {
+            return new Vector3(value.x, value.y, value.z);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Vector3 Int3ToVector3(int3 value)
+        {
+            return new Vector3(value.x, value.y, value.z);
         }
     }
 }

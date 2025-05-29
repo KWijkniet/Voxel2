@@ -24,26 +24,19 @@ namespace Custom.Voxels.Generators
             this.triangles = triangles;
             this.uvs = uvs;
 
-            for (int x = 0; x < size.x; x++)
+            int sizeSquared = size.x * size.y * size.z;
+            for (int i = 0; i < sizeSquared; i++)
             {
-                for (int y = 0; y < size.y; y++)
-                {
-                    for (int z = 0; z < size.z; z++)
-                    {
-                        int index = MathematicsHelper.XYZToIndex(x, y, z, size);
-                        if (voxels[index] == 0) continue; // Air
+                if (voxels[i] == 0) continue; // Air
+                float3 pos = MathematicsHelper.IndexToXYZ(i, size);
 
-                        float3 pos = new float3(x, y, z);
-
-                        // Check each face — if neighbor is air or out of bounds, add face
-                        TryAddFace(pos, new int3(-1, 0, 0), CubeFace.Left);   // -X
-                        TryAddFace(pos, new int3(1, 0, 0), CubeFace.Right);  // +X
-                        TryAddFace(pos, new int3(0, -1, 0), CubeFace.Bottom); // -Y
-                        TryAddFace(pos, new int3(0, 1, 0), CubeFace.Top);     // +Y
-                        TryAddFace(pos, new int3(0, 0, -1), CubeFace.Back);   // -Z
-                        TryAddFace(pos, new int3(0, 0, 1), CubeFace.Front);   // +Z
-                    }
-                }
+                // Check each face — if neighbor is air or out of bounds, add face
+                TryAddFace(pos, new int3(-1, 0, 0), CubeFace.Left);   // -X
+                TryAddFace(pos, new int3(1, 0, 0), CubeFace.Right);  // +X
+                TryAddFace(pos, new int3(0, -1, 0), CubeFace.Bottom); // -Y
+                TryAddFace(pos, new int3(0, 1, 0), CubeFace.Top);     // +Y
+                TryAddFace(pos, new int3(0, 0, -1), CubeFace.Back);   // -Z
+                TryAddFace(pos, new int3(0, 0, 1), CubeFace.Front);   // +Z
             }
         }
 

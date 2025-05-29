@@ -37,7 +37,12 @@ namespace Custom.Voxels.Generators
             this.greedyVoxels = new(Allocator.Temp);
 
             // Calculate greedy voxels
-            CalculateGreedy(new int3(1, 0, 0), new int3(0, 0, 1));
+            CalculateGreedy(new int3(1, 0, 0), new int3(0, 0, 1));      // Back
+            CalculateGreedy(new int3(1, 0, 0), new int3(0, 0, -1));     // Front
+            CalculateGreedy(new int3(0, 0, 1), new int3(1, 0, 0));      // Right
+            CalculateGreedy(new int3(0, 0, 1), new int3(-1, 0, 0));     // Left
+            CalculateGreedy(new int3(0, 1, 0), new int3(0, 1, 0));      // Top
+            CalculateGreedy(new int3(0, 1, 0), new int3(0, -1, 0));     // Bottom
             this.visited.Dispose();
 
             // Build mesh
@@ -50,94 +55,93 @@ namespace Custom.Voxels.Generators
             if (visited.IsCreated) visited.Dispose();
             visited = new(size.x * size.y * size.z, Allocator.Temp);
 
-            for (int z = 0; z < size.x; z++)
+            int sizeSquared = size.x * size.y * size.z;
+            for (int i = 0; i < sizeSquared; i++)
             {
-                for (int y = 0; y < size.y; y++)
+                int3 pos = MathematicsHelper.IndexToXYZ(i, size);
+                int x = pos.x;
+                int y = pos.y;
+                int z = pos.z;
+
+                // Validate current voxel
+                if (IsValid(new int3(x, y, z), facing) == 0) continue;
+
+                // Start current progress
+                visited[i] = 1;
+                byte currWidth = 1;
+                byte currHeight = 1;
+
+                // Set direction values
+                byte isY = (byte)(dir.y != 0 ? 1 : 0);
+                byte isX = (byte)(isY == 1 ? 1 : (byte)(dir.x != 0 ? 1 : 0));
+
+                // Loop over x axis first
+                while (
+                    (isX == 1 ? x : z) + currWidth < (isX == 1 ? size.x : size.z) &&
+                    IsValidNeighbour(
+                        new int3(x, y, z),
+                        new int3(x + (isX == 1 ? currWidth : 0), y, z + (isX == 0 ? currWidth : 0)),
+                        facing
+                    ) == 1
+                )
                 {
-                    for (int x = 0; x < size.z; x++)
+                    int visitedIndex = MathematicsHelper.XYZToIndex(x + (isX == 1 ? currWidth : 0), y, z + (isX == 0 ? currWidth : 0), size);
+                    visited[visitedIndex] = 1;
+                    currWidth++;
+                }
+
+                // Loop over y axis
+                for (int rh = (isY == 0 ? y : z) + 1; rh < (isY == 1 ? size.z : size.y); rh++)
+                {
+                    byte validRow = 1;
+
+                    // Validate row
+                    int rwStart = (isX == 1 ? x : z);
+                    int rwEnd = rwStart + currWidth;
+
+                    for (int rw = rwStart; rw < rwEnd; rw++)
                     {
-                        // Validate current voxel
-                        if (IsValid(new int3(x, y, z), facing) == 0) continue;
-                        int posIndex = MathematicsHelper.XYZToIndex(x, y, z, size);
+                        int vx = isX == 1 ? rw : x;
+                        int vy = isY == 0 ? rh : y;
+                        int vz = isX == 0 ? rw : z;
+                        if (isY == 1) vz = rh;
 
-                        // Start current progress
-                        visited[posIndex] = 1;
-                        byte currWidth = 1;
-                        byte currHeight = 1;
-
-                        // Set direction values
-                        byte isY = (byte) (dir.y != 0 ? 1 : 0);
-                        byte isX = (byte) (isY == 1 ? 1 : (byte) (dir.x != 0 ? 1 : 0));
-                        Debug.Log("isX: " + isX);
-                        // Loop over x axis first
-                        while (
-                            (isX == 1 ? x : z) + currWidth < (isX == 1 ? size.x : size.z) &&
-                            IsValidNeighbour(
-                                new int3(x, y, z),
-                                new int3(x + (isX == 1 ? currWidth : 0), y, z + (isX == 0 ? currWidth : 0)),
-                                facing
-                            ) == 1
-                        )
+                        if (IsValidNeighbour(new int3(x, y, z), new int3(vx, vy, vz), facing) == 0)
                         {
-                            int visitedIndex = MathematicsHelper.XYZToIndex(x + (isX == 1 ? currWidth : 0), y, z + (isX == 0 ? currWidth : 0), size);
-                            visited[visitedIndex] = 1;
-                            currWidth++;
+                            validRow = 0;
+                            break;
                         }
+                    }
 
-                        //// Loop over y axis
-                        //for (int rh = (isY == 0 ? y : z) + 1; rh < (isY == 1 ? size.z : size.y); rh++)
-                        //{
-                        //    byte validRow = 1;
-
-                        //    // Validate row
-                        //    int rwStart = (isX == 1 ? x : z);
-                        //    int rwEnd = rwStart + currWidth;
-
-                        //    for (int rw = rwStart; rw < rwEnd; rw++)
-                        //    {
-                        //        int vx = isX == 1 ? rw : x;
-                        //        int vy = isY == 0 ? rh : y;
-                        //        int vz = isX == 0 ? rw : z;
-                        //        if (isY == 1) vz = rh;
-
-                        //        if (IsValidNeighbour(new int3(x, y, z), new int3(vx, vy, vz), facing) == 0)
-                        //        {
-                        //            validRow = 0;
-                        //            break;
-                        //        }
-                        //    }
-
-                        //    // Update visited if row is valid
-                        //    if (validRow == 1)
-                        //    {
-                        //        currHeight++;
-                        //        for (int rw = rwStart; rw < rwEnd; rw++)
-                        //        {
-                        //            int vx = isX == 1 ? rw : x;
-                        //            int vy = isY == 0 ? rh : y;
-                        //            int vz = isX == 0 ? rw : z;
-                        //            if (isY == 1) vz = rh;
-
-                        //            int visitedIndex = MathematicsHelper.XYZToIndex(vx, vy, vz, size);
-                        //            visited[visitedIndex] = 1;
-                        //        }
-                        //    }
-                        //    else
-                        //    {
-                        //        break;
-                        //    }
-                        //}
-
-                        //Store valid Greedy voxel data
-                        greedyVoxels.Add(new GreedyVoxel
+                    // Update visited if row is valid
+                    if (validRow == 1)
+                    {
+                        currHeight++;
+                        for (int rw = rwStart; rw < rwEnd; rw++)
                         {
-                            id = voxels[posIndex],
-                            pos = new int3(x, y, z),
-                            size = new int2(currWidth, currHeight),
-                            facing = facing
-                        });
+                            int vx = isX == 1 ? rw : x;
+                            int vy = isY == 0 ? rh : y;
+                            int vz = isX == 0 ? rw : z;
+                            if (isY == 1) vz = rh;
+
+                            int visitedIndex = MathematicsHelper.XYZToIndex(vx, vy, vz, size);
+                            visited[visitedIndex] = 1;
+                        }
+                    }
+                    else
+                    {
+                        break;
                     }
                 }
+
+                //Store valid Greedy voxel data
+                greedyVoxels.Add(new GreedyVoxel
+                {
+                    id = voxels[i],
+                    pos = new int3(x, y, z),
+                    size = new int2(currWidth, currHeight),
+                    facing = facing
+                });
             }
         }
 
@@ -176,7 +180,6 @@ namespace Custom.Voxels.Generators
         {
             int currPosIndex = MathematicsHelper.XYZToIndex(currPos.x, currPos.y, currPos.z, size);
             byte currentId = voxels[currPosIndex];
-            //VoxelEntry? currVoxel = Database.GetEntry(currentId);
 
             // Validate position
             int nextPosIndex = MathematicsHelper.XYZToIndex(nextPos.x, nextPos.y, nextPos.z, size);
@@ -210,33 +213,110 @@ namespace Custom.Voxels.Generators
 
         private void BuildMesh()
         {
-            Debug.Log("Greedy Voxels Length: " + greedyVoxels.Length);
             foreach (GreedyVoxel voxel in greedyVoxels)
             {
                 byte id = voxel.id;
                 int3 pos = voxel.pos;
                 int width = voxel.size.x;
                 int height = voxel.size.y;
-                if (pos.x + width > size.x) Debug.Log(pos.x + ", " + pos.y + ": " + width);
 
-                if (voxel.facing.Equals(new int3(0, 0, 1)))
+                int vertexIndex = vertices.Length;
+
+                // Precompute for convenience
+                int x = pos.x;
+                int y = pos.y;
+                int z = pos.z;
+
+                // RIGHT face (+X)
+                if (voxel.facing.Equals(new int3(1, 0, 0)))
                 {
-                    int vertexIndex = vertices.Length;
+                    vertices.Add(new float3(x + 1, y, z));
+                    vertices.Add(new float3(x + 1, y + height, z));
+                    vertices.Add(new float3(x + 1, y, z + width));
+                    vertices.Add(new float3(x + 1, y + height, z + width));
 
-                    // Set vertices
-                    vertices.Add(new float3(pos.x, pos.y, pos.z) + new float3(1, 0, 0));
-                    vertices.Add(new float3(pos.x, pos.y, voxel.pos.z) + new float3(1, height, 0));
-                    vertices.Add(new float3(pos.x, pos.y, pos.z) + new float3(1, 0, width));
-                    vertices.Add(new float3(pos.x, pos.y, pos.z) + new float3(1, height, width));
-
-                    // Add UVs with tiling
-                    uvs.Add(new float2(0, 0));
-                    uvs.Add(new float2(0, height));
-                    uvs.Add(new float2(width, 0));
-                    uvs.Add(new float2(width, height));
-
-                    for (int j = 0; j < 6; j++) triangles.Add(vertexIndex + faceTriangles[6 * 4 + j]);
+                    AddUVs(width, height);
+                    AddTriangles(vertexIndex, 4); // index 4 = Right
                 }
+
+                // LEFT face (-X)
+                else if (voxel.facing.Equals(new int3(-1, 0, 0)))
+                {
+                    vertices.Add(new float3(x, y, z + width));
+                    vertices.Add(new float3(x, y + height, z + width));
+                    vertices.Add(new float3(x, y, z));
+                    vertices.Add(new float3(x, y + height, z));
+
+                    AddUVs(width, height);
+                    AddTriangles(vertexIndex, 5); // index 5 = Left
+                }
+
+                // TOP face (+Y)
+                else if (voxel.facing.Equals(new int3(0, 1, 0)))
+                {
+                    vertices.Add(new float3(x, y + 1, z + height));
+                    vertices.Add(new float3(x + width, y + 1, z + height));
+                    vertices.Add(new float3(x, y + 1, z));
+                    vertices.Add(new float3(x + width, y + 1, z));
+
+                    AddUVs(width, height);
+                    AddTriangles(vertexIndex, 2); // index 2 = Top
+                }
+
+                // BOTTOM face (-Y)
+                else if (voxel.facing.Equals(new int3(0, -1, 0)))
+                {
+                    vertices.Add(new float3(x, y, z + height));
+                    vertices.Add(new float3(x, y, z));
+                    vertices.Add(new float3(x + width, y, z + height));
+                    vertices.Add(new float3(x + width, y, z));
+
+                    AddUVs(width, height);
+                    AddTriangles(vertexIndex, 3); // index 3 = Bottom
+                }
+
+                // BACK face (+Z)
+                else if (voxel.facing.Equals(new int3(0, 0, 1)))
+                {
+                    vertices.Add(new float3(x, y, z + 1));
+                    vertices.Add(new float3(x + width, y, z + 1));
+                    vertices.Add(new float3(x, y + height, z + 1));
+                    vertices.Add(new float3(x + width, y + height, z + 1));
+
+                    AddUVs(width, height);
+                    AddTriangles(vertexIndex, 0); // index 0 = Back
+                }
+
+                // FRONT face (-Z)
+                else if (voxel.facing.Equals(new int3(0, 0, -1)))
+                {
+                    vertices.Add(new float3(x + width, y, z));
+                    vertices.Add(new float3(x + width, y + height, z));
+                    vertices.Add(new float3(x, y, z));
+                    vertices.Add(new float3(x, y + height, z));
+
+                    AddUVs(width, height);
+                    AddTriangles(vertexIndex, 1); // index 1 = Front
+                }
+            }
+        }
+
+        // Helper to add UVs
+        private void AddUVs(int width, int height)
+        {
+            uvs.Add(new float2(0, 0));
+            uvs.Add(new float2(0, height));
+            uvs.Add(new float2(width, 0));
+            uvs.Add(new float2(width, height));
+        }
+
+        // Helper to add face triangles
+        private void AddTriangles(int vertexIndex, int faceIndex)
+        {
+            int baseIndex = faceIndex * 6;
+            for (int i = 0; i < 6; i++)
+            {
+                triangles.Add(vertexIndex + faceTriangles[baseIndex + i]);
             }
         }
 

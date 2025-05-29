@@ -4,12 +4,13 @@ using Custom.Voxels.Jobs;
 using Unity.Jobs;
 using Unity.Mathematics;
 using Custom.Voxels.Helpers;
+using System.Collections.Generic;
 
 namespace Custom.Voxels
 {
     public class Chunk
     {
-        public Vector3 pos;
+        public int3 pos;
         public bool hasCalculated = false;
         public bool hasGenerated = false;
 
@@ -24,11 +25,28 @@ namespace Custom.Voxels
 
         private Matrix4x4 matrix;
         private Mesh mesh;
+        private byte generationMode;
+        private Bounds bounds;
+        private List<Chunk> neighbours;
 
-        public Chunk(Vector3 pos)
+        public Chunk(int3 pos, byte generationMode)
         {
             this.pos = pos;
-            matrix = Matrix4x4.TRS(pos, Quaternion.identity, Vector3.one);
+            matrix = Matrix4x4.TRS(MathematicsHelper.Int3ToVector3(pos), Quaternion.identity, Vector3.one);
+            this.generationMode = generationMode;
+            this.bounds = new Bounds(new Vector3(pos.x + WorldSettings.SIZE.x / 2, pos.y + WorldSettings.SIZE.y / 2, pos.z + WorldSettings.SIZE.z / 2), MathematicsHelper.Float3ToVector3(WorldSettings.SIZE));
+
+            neighbours = new List<Chunk>(6);
+        }
+
+        public void LoadNeighbours()
+        {
+            foreach (var offset in WorldSettings.neighbourPositions)
+            {
+                Chunk neighbor = WorldSettings.chunks.GetChunk(pos + offset);
+                if (neighbor != null)
+                    neighbours.Add(neighbor);
+            }
         }
 
         public byte GetVoxel(int x, int y, int z)
@@ -86,7 +104,7 @@ namespace Custom.Voxels
 
         private void Generate()
         {
-            if (hasGenerated || !hasCalculated) return;
+            if (hasGenerated || !hasCalculated || !NeighboursReady()) return;
 
             if (!jobRunning)
             {
@@ -96,6 +114,7 @@ namespace Custom.Voxels
 
                 GenerateChunkJob job = new GenerateChunkJob
                 {
+                    generationMode = generationMode,
                     size = WorldSettings.SIZE,
                     voxels = voxels,
                     vertices = vertices,
@@ -113,17 +132,19 @@ namespace Custom.Voxels
                 jobRunning = false;
 
                 if (mesh) mesh.Clear();
-                mesh = new Mesh
+                else
                 {
-                    name = "Chunk Mesh",
-                    indexFormat = UnityEngine.Rendering.IndexFormat.UInt32
-                };
+                    mesh = new Mesh
+                    {
+                        name = "Chunk Mesh",
+                        indexFormat = UnityEngine.Rendering.IndexFormat.UInt32
+                    };
+                    mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt16;
+                }
                 mesh.MarkDynamic();
 
                 // Assign to mesh
                 mesh.Clear();
-                Debug.Log("Mesh Size: " + vertices.Length + ", " + triangles.Length + ", " + uvs.Length);
-                //mesh.subMeshCount = 2;
                 mesh.vertices = MeshHelper.NativeToVector3(vertices);
                 mesh.SetTriangles(MeshHelper.NativeToInt(triangles), 0);
                 mesh.SetUVs(0, MeshHelper.NativeToFloat2(uvs));
@@ -134,6 +155,9 @@ namespace Custom.Voxels
                 vertices.Dispose();
                 triangles.Dispose();
                 uvs.Dispose();
+                mesh.tangents = null;
+                mesh.colors = null;
+                mesh.UploadMeshData(true);
             }
         }
 
@@ -141,7 +165,25 @@ namespace Custom.Voxels
         {
             if (!hasGenerated || !mesh) return;
 
-            Graphics.RenderMesh(WorldSettings.RENDERPARAMS, mesh, 0, matrix);
+            if (GeometryUtility.TestPlanesAABB(WorldSettings.cameraPlanes, bounds))
+            {
+                Graphics.RenderMesh(WorldSettings.RENDERPARAMS, mesh, 0, matrix);
+            }
+        }
+
+        private bool NeighboursReady()
+        {
+            if (neighbours.Count == 0) return true;
+
+            foreach (Chunk item in neighbours)
+            {
+                if (!item.hasCalculated)
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
     }
 }

@@ -2,6 +2,7 @@ using System.Drawing;
 using UnityEngine;
 using Custom.Voxels.Helpers;
 using System.Collections.Generic;
+using Unity.Mathematics;
 
 namespace Custom.Voxels
 {
@@ -11,12 +12,12 @@ namespace Custom.Voxels
         public bool showDebug = false;
         public int chunksX = 1;
         public int chunksZ = 1;
-
-        private List<Chunk> chunks;
+        public byte generationMode = 0;
 
         private void Start()
         {
             Database database = new Database();
+            WorldSettings.camera = Camera.main;
             WorldSettings.RENDERPARAMS = new RenderParams(mat)
             {
                 instanceID = 0,
@@ -27,21 +28,39 @@ namespace Custom.Voxels
                 shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On
             };
 
-            chunks = new List<Chunk>();
             for (int x = 0; x < chunksX; x++)
             {
                 for (int z = 0; z < chunksZ; z++)
                 {
-                    chunks.Add(new Chunk(new Vector3(x * WorldSettings.SIZE.x, 0, z * WorldSettings.SIZE.z)));
+                    int3 pos = new(
+                        (int) transform.position.x + x * WorldSettings.SIZE.x,
+                        (int) transform.position.y + 0,
+                        (int) transform.position.z + z * WorldSettings.SIZE.z
+                    );
+                    WorldSettings.chunks.SetChunk(pos, new Chunk(
+                        pos,
+                        generationMode
+                    ));
                 }
             }
+
+            foreach (Chunk item in WorldSettings.chunks.GetAll())
+            {
+                item.LoadNeighbours();
+            }
+        }
+
+        private void OnApplicationQuit()
+        {
+            WorldSettings.chunks.Clear();
         }
 
         private void Update()
         {
-            if (chunks == null || chunks.Count <= 0) return;
+            if (WorldSettings.chunks.Count() <= 0) return;
+            WorldSettings.cameraPlanes = GeometryUtility.CalculateFrustumPlanes(WorldSettings.camera);
 
-            foreach (Chunk item in chunks)
+            foreach (Chunk item in WorldSettings.chunks.GetAll())
             {
                 item.Update();
             }
@@ -49,9 +68,9 @@ namespace Custom.Voxels
 
         void OnDrawGizmos()
         {
-            if (!showDebug || chunks == null || chunks.Count <= 0) return;
+            if (!showDebug || WorldSettings.chunks.Count() <= 0) return;
 
-            foreach (Chunk item in chunks)
+            foreach (Chunk item in WorldSettings.chunks.GetAll())
             {
                 UnityEngine.Color color = UnityEngine.Color.white;
                 if (item.hasGenerated)
@@ -63,7 +82,7 @@ namespace Custom.Voxels
                     color = UnityEngine.Color.blue;
                 }
                 Gizmos.color = color;
-                Gizmos.DrawWireCube(item.pos + Vector3.one * (WorldSettings.SIZE.x / 2), new Vector3(WorldSettings.SIZE.x, WorldSettings.SIZE.y, WorldSettings.SIZE.z));
+                Gizmos.DrawWireCube(MathematicsHelper.Int3ToVector3(item.pos) + Vector3.one * (WorldSettings.SIZE.x / 2), new Vector3(WorldSettings.SIZE.x, WorldSettings.SIZE.y, WorldSettings.SIZE.z));
             }
         }
     }

@@ -11,6 +11,7 @@ namespace Custom.Voxels.Jobs
     {
         [ReadOnly] public int3 size;
         [ReadOnly] public NativeArray<byte> voxels;
+        [ReadOnly] public byte generationMode;
 
         public NativeList<float3> vertices;
         public NativeList<int> triangles;
@@ -18,8 +19,8 @@ namespace Custom.Voxels.Jobs
 
         public void Execute()
         {
-            //new VoxelMesh(size, voxels, vertices, triangles, uvs);
-            new GreedyMesh(size, voxels, vertices, triangles, uvs);
+            if (generationMode == 0) new VoxelMesh(size, voxels, vertices, triangles, uvs);
+            if (generationMode == 1) new GreedyMesh(size, voxels, vertices, triangles, uvs);
         }
     }
 }
