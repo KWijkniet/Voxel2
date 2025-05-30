@@ -15,7 +15,7 @@ namespace Custom.Voxels.Generators
         private NativeList<int> triangles;
         private NativeList<float2> uvs;
 
-        public VoxelMesh(int3 size, NativeArray<byte> voxels, NativeList<float3> vertices, NativeList<int> triangles, NativeList<float2> uvs)
+        public VoxelMesh(int3 size, NativeArray<byte> voxels, NativeList<float3> vertices, NativeList<int> triangles, NativeList<float2> uvs, Neighbours neighbours)
         {
             this.size = size;
             this.voxels = voxels;

@@ -25,8 +25,9 @@ namespace Custom.Voxels.Generators
 
         private NativeArray<byte> visited;
         private NativeList<GreedyVoxel> greedyVoxels;
+        private Neighbours neighbours;
 
-        public GreedyMesh(int3 size, NativeArray<byte> voxels, NativeList<float3> vertices, NativeList<int> triangles, NativeList<float2> uvs)
+        public GreedyMesh(int3 size, NativeArray<byte> voxels, NativeList<float3> vertices, NativeList<int> triangles, NativeList<float2> uvs, Neighbours neighbours)
         {
             this.size = size;
             this.voxels = voxels;
@@ -35,6 +36,7 @@ namespace Custom.Voxels.Generators
             this.triangles = triangles;
             this.uvs = uvs;
             this.greedyVoxels = new(Allocator.Temp);
+            this.neighbours = neighbours;
 
             // Calculate greedy voxels
             CalculateGreedy(new int3(1, 0, 0), new int3(0, 0, 1));      // Back
@@ -161,11 +163,17 @@ namespace Custom.Voxels.Generators
             if (voxel == null || voxel?.canGreedyMesh == 0 || voxel?.type != VoxelType.Voxel) return 0;
 
             // Validate facing position
+            byte neighbourId = 0;
             int facingIndex = MathematicsHelper.XYZToIndex(pos.x + facing.x, pos.y + facing.y, pos.z + facing.z, size);
-            if (facingIndex < 0 || facingIndex > size.x * size.y * size.z) return 1; // Outside current chunk
+            if (facingIndex < 0 || facingIndex > size.x * size.y * size.z)
+            {
+                // Outside current chunk
+                neighbourId = GetNeighbouringVoxel(pos + facing);
+                if (neighbourId == 0) return 1;
+            }
 
             // Validate id
-            byte facingId = voxels[facingIndex];
+            byte facingId = neighbourId != 0 ? neighbourId : voxels[facingIndex];
             if (facingId == 0) return 1;
 
             // Validate type
@@ -195,11 +203,17 @@ namespace Custom.Voxels.Generators
             if (nextVoxel == null || nextVoxel?.canGreedyMesh == 0 || nextVoxel?.type != VoxelType.Voxel) return 0;
 
             // Validate facing position
+            byte neighbourId = 0;
             int facingIndex = MathematicsHelper.XYZToIndex(nextPos.x + facing.x, nextPos.y + facing.y, nextPos.z + facing.z, size);
-            if (facingIndex < 0 || facingIndex > size.x * size.y * size.z) return 1; // Outside current chunk
+            if (facingIndex < 0 || facingIndex > size.x * size.y * size.z)
+            {
+                // Outside current chunk
+                neighbourId = GetNeighbouringVoxel(nextPos + facing);
+                if (neighbourId == 0) return 1;
+            }
 
             // Validate id
-            byte facingId = voxels[facingIndex];
+            byte facingId = neighbourId != 0 ? neighbourId : voxels[facingIndex];
             if (facingId == 0) return 1;
             if (facingId == nextId) return 0;
 
@@ -318,6 +332,61 @@ namespace Custom.Voxels.Generators
             {
                 triangles.Add(vertexIndex + faceTriangles[baseIndex + i]);
             }
+        }
+
+        private byte GetNeighbouringVoxel(int3 pos)
+        {
+            int3 dir = new(0, 0, 0);
+
+            if (pos.x >= size.x)
+            {
+                pos.x -= size.x;
+                dir.x = 1;
+            }
+            else if (pos.x < 0)
+            {
+                pos.x += size.x;
+                dir.x = -1;
+            }
+
+            if (pos.y >= size.y)
+            {
+                pos.y -= size.y;
+                dir.y = 1;
+            }
+            else if (pos.y < 0)
+            {
+                pos.y += size.y;
+                dir.y = -1;
+            }
+
+            if (pos.z >= size.z)
+            {
+                pos.z -= size.z;
+                dir.z = 1;
+            }
+            else if (pos.z < 0)
+            {
+                pos.z += size.z;
+                dir.z = -1;
+            }
+            return GetNeighbouringChunkVoxel(dir, pos);
+        }
+
+        private byte GetNeighbouringChunkVoxel(int3 dir, int3 pos)
+        {
+            NativeArray<byte> res = default;
+            if (dir.x > 0) res = neighbours.xPos;
+            else if (dir.x < 0) res = neighbours.xNeg;
+            
+            if (dir.y > 0) res = neighbours.yPos;
+            else if (dir.y < 0) res = neighbours.yNeg;
+
+            if (dir.z > 0) res = neighbours.zPos;
+            else if (dir.z < 0) res = neighbours.zNeg;
+
+            if (!res.IsCreated || res.Length <= 0) return 0;
+            else return res[MathematicsHelper.XYZToIndex(pos.x, pos.y, pos.z, size)];
         }
 
         private static int[] faceTriangles = {

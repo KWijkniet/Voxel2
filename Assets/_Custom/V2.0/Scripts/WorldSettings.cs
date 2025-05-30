@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Unity.Collections;
 using Unity.Mathematics;
 using UnityEngine;
 
@@ -16,6 +17,7 @@ namespace Custom.Voxels
         public static Camera camera;
         public static Plane[] cameraPlanes;
         public static ChunkManager chunks = new ChunkManager();
+        public static NativeArray<byte> emptyVoxels;
 
         public static int3[] neighbourPositions = new int3[]
         {

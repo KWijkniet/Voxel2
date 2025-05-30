@@ -18,6 +18,7 @@ namespace Custom.Voxels
         {
             Database database = new Database();
             WorldSettings.camera = Camera.main;
+            WorldSettings.emptyVoxels = new Unity.Collections.NativeArray<byte>(0, Unity.Collections.Allocator.Persistent);
             WorldSettings.RENDERPARAMS = new RenderParams(mat)
             {
                 instanceID = 0,
@@ -53,6 +54,12 @@ namespace Custom.Voxels
         private void OnApplicationQuit()
         {
             WorldSettings.chunks.Clear();
+            WorldSettings.emptyVoxels.Dispose();
+
+            foreach (Chunk item in WorldSettings.chunks.GetAll())
+            {
+                item.Dispose();
+            }
         }
 
         private void Update()

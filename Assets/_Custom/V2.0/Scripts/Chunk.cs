@@ -5,6 +5,7 @@ using Unity.Jobs;
 using Unity.Mathematics;
 using Custom.Voxels.Helpers;
 using System.Collections.Generic;
+using static UnityEditor.Progress;
 
 namespace Custom.Voxels
 {
@@ -27,7 +28,7 @@ namespace Custom.Voxels
         private Mesh mesh;
         private byte generationMode;
         private Bounds bounds;
-        private List<Chunk> neighbours;
+        private Dictionary<int3, Chunk> neighbours;
 
         public Chunk(int3 pos, byte generationMode)
         {
@@ -36,7 +37,7 @@ namespace Custom.Voxels
             this.generationMode = generationMode;
             this.bounds = new Bounds(new Vector3(pos.x + WorldSettings.SIZE.x / 2, pos.y + WorldSettings.SIZE.y / 2, pos.z + WorldSettings.SIZE.z / 2), MathematicsHelper.Float3ToVector3(WorldSettings.SIZE));
 
-            neighbours = new List<Chunk>(6);
+            neighbours = new Dictionary<int3, Chunk>(6);
         }
 
         public void LoadNeighbours()
@@ -45,7 +46,7 @@ namespace Custom.Voxels
             {
                 Chunk neighbor = WorldSettings.chunks.GetChunk(pos + offset);
                 if (neighbor != null)
-                    neighbours.Add(neighbor);
+                    neighbours.Add(pos + offset, neighbor);
             }
         }
 
@@ -55,6 +56,22 @@ namespace Custom.Voxels
             
             if (index >= 0 && index < voxels.Length) return voxels[index];
             return 0;
+        }
+
+        public NativeArray<byte> GetVoxels()
+        {
+            return voxels;
+        }
+
+        public void Dispose()
+        {
+            if (heightmap.IsCreated) heightmap.Dispose();
+            if (voxels.IsCreated) voxels.Dispose();
+            if (vertices.IsCreated) vertices.Dispose();
+            if (triangles.IsCreated) triangles.Dispose();
+            if (uvs.IsCreated) uvs.Dispose();
+
+            if (mesh) mesh.Clear();
         }
 
         public void Update()
@@ -111,6 +128,7 @@ namespace Custom.Voxels
                 vertices = new NativeList<float3>(Allocator.TempJob);
                 triangles = new NativeList<int>(Allocator.TempJob);
                 uvs = new NativeList<float2>(Allocator.TempJob);
+                int3[] neighborOffsets = WorldSettings.neighbourPositions;
 
                 GenerateChunkJob job = new GenerateChunkJob
                 {
@@ -119,7 +137,33 @@ namespace Custom.Voxels
                     voxels = voxels,
                     vertices = vertices,
                     triangles = triangles,
-                    uvs = uvs
+                    uvs = uvs,
+                    neighbours = new Neighbours
+                    {
+                        xPos = neighbours.TryGetValue(pos + neighborOffsets[0], out var nxp)
+                            ? nxp.GetVoxels()
+                            : WorldSettings.emptyVoxels,
+
+                        xNeg = neighbours.TryGetValue(pos + neighborOffsets[1], out var nxn)
+                            ? nxn.GetVoxels()
+                            : WorldSettings.emptyVoxels,
+
+                        yPos = neighbours.TryGetValue(pos + neighborOffsets[2], out var nyp)
+                            ? nyp.GetVoxels()
+                            : WorldSettings.emptyVoxels,
+
+                        yNeg = neighbours.TryGetValue(pos + neighborOffsets[3], out var nyn)
+                            ? nyn.GetVoxels()
+                            : WorldSettings.emptyVoxels,
+
+                        zPos = neighbours.TryGetValue(pos + neighborOffsets[4], out var nzp)
+                            ? nzp.GetVoxels()
+                            : WorldSettings.emptyVoxels,
+
+                        zNeg = neighbours.TryGetValue(pos + neighborOffsets[5], out var nzn)
+                            ? nzn.GetVoxels()
+                            : WorldSettings.emptyVoxels,
+                    }
                 };
 
                 jobHandle = job.Schedule();
@@ -175,11 +219,16 @@ namespace Custom.Voxels
         {
             if (neighbours.Count == 0) return true;
 
-            foreach (Chunk item in neighbours)
+
+            foreach (var offset in WorldSettings.neighbourPositions)
             {
-                if (!item.hasCalculated)
+                if (neighbours.ContainsKey(pos + offset))
                 {
-                    return false;
+                    Chunk item = neighbours[pos + offset];
+                    if (!item.hasCalculated)
+                    {
+                        return false;
+                    }
                 }
             }
 
