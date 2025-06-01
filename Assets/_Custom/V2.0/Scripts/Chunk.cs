@@ -29,6 +29,7 @@ namespace Custom.Voxels
         private byte generationMode;
         private Bounds bounds;
         private Dictionary<int3, Chunk> neighbours;
+        private int lastLod = 1;
 
         public Chunk(int3 pos, byte generationMode)
         {
@@ -74,26 +75,22 @@ namespace Custom.Voxels
             if (mesh) mesh.Clear();
         }
 
-        public void Update()
-        {
-            Calculate();
-            Generate();
-            Render();
-        }
-
-        private void Calculate()
+        public void Calculate()
         {
             if (hasCalculated && !heightmap.IsCreated) return;
 
             if (!jobRunning)
             {
-                heightmap = new NativeArray<int>(WorldSettings.SIZE.x * WorldSettings.SIZE.z, Allocator.TempJob);
+                heightmap = new NativeArray<int>(WorldSettings.SIZE.x * WorldSettings.SIZE.z, Allocator.Persistent);
                 int index = 0;
                 for (int x = 0; x < WorldSettings.SIZE.x; x++)
                 {
                     for (int z = 0; z < WorldSettings.SIZE.z; z++)
                     {
-                        heightmap[index] = (int)math.round(noise.cnoise(new float2(x * 10000, z * 10000)) * WorldSettings.SIZE.y);
+                        float rawNoise = noise.cnoise(new float2((pos.x + x + 100000) * 0.1f, (pos.z + z + 100000) * 0.1f));
+                        float normalNoise = (rawNoise + 1f) * 0.5f;
+                        int height = (int)math.round(normalNoise * WorldSettings.SIZE.y);
+                        heightmap[index] = height;
                         index++;
                     }
                 }
@@ -102,6 +99,7 @@ namespace Custom.Voxels
                 CalculateChunkJob job = new CalculateChunkJob
                 {
                     size = WorldSettings.SIZE,
+                    pos = pos,
                     heightmap = heightmap,
                     voxels = voxels
                 };
@@ -119,15 +117,20 @@ namespace Custom.Voxels
             }
         }
 
-        private void Generate()
+        public void Generate(int lod = 1)
         {
+            if (hasGenerated && !jobRunning && lod != lastLod)
+            {
+                hasGenerated = false;
+            }
             if (hasGenerated || !hasCalculated || !NeighboursReady()) return;
 
             if (!jobRunning)
             {
-                vertices = new NativeList<float3>(Allocator.TempJob);
-                triangles = new NativeList<int>(Allocator.TempJob);
-                uvs = new NativeList<float2>(Allocator.TempJob);
+                lastLod = lod;
+                vertices = new NativeList<float3>(Allocator.Persistent);
+                triangles = new NativeList<int>(Allocator.Persistent);
+                uvs = new NativeList<float2>(Allocator.Persistent);
                 int3[] neighborOffsets = WorldSettings.neighbourPositions;
 
                 GenerateChunkJob job = new GenerateChunkJob
@@ -138,6 +141,7 @@ namespace Custom.Voxels
                     vertices = vertices,
                     triangles = triangles,
                     uvs = uvs,
+                    divider = lastLod,
                     neighbours = new Neighbours
                     {
                         xPos = neighbours.TryGetValue(pos + neighborOffsets[0], out var nxp)
@@ -185,6 +189,7 @@ namespace Custom.Voxels
                     };
                     mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt16;
                 }
+                //mesh.UploadMeshData(false);
                 mesh.MarkDynamic();
 
                 // Assign to mesh
@@ -201,11 +206,11 @@ namespace Custom.Voxels
                 uvs.Dispose();
                 mesh.tangents = null;
                 mesh.colors = null;
-                mesh.UploadMeshData(true);
+                //mesh.UploadMeshData(true);
             }
         }
 
-        private void Render()
+        public void Render()
         {
             if (!hasGenerated || !mesh) return;
 
@@ -213,6 +218,11 @@ namespace Custom.Voxels
             {
                 Graphics.RenderMesh(WorldSettings.RENDERPARAMS, mesh, 0, matrix);
             }
+        }
+
+        public int GetLOD()
+        {
+            return lastLod;
         }
 
         private bool NeighboursReady()

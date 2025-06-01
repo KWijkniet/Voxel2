@@ -13,6 +13,7 @@ namespace Custom.Voxels.Jobs
         [ReadOnly] public NativeArray<byte> voxels;
         [ReadOnly] public byte generationMode;
         [ReadOnly] public Neighbours neighbours;
+        [ReadOnly] public int divider;
 
         public NativeList<float3> vertices;
         public NativeList<int> triangles;
@@ -22,6 +23,18 @@ namespace Custom.Voxels.Jobs
         {
             if (generationMode == 0) new VoxelMesh(size, voxels, vertices, triangles, uvs, neighbours);
             if (generationMode == 1) new GreedyMesh(size, voxels, vertices, triangles, uvs, neighbours);
+            if (generationMode == 2)
+            {
+                NativeArray<byte> lodVoxels = new LevelOfDetail(size, voxels, divider).DownSample();
+                int3 newSize = divider == 1 ? size : new int3(size.x / divider, size.y / divider, size.z / divider);
+                new GreedyMesh(newSize, lodVoxels, vertices, triangles, uvs, neighbours);
+                lodVoxels.Dispose();
+
+                if (divider != 1)
+                {
+                    for (int i = 0; i < vertices.Length; i++) vertices[i] *= divider;
+                }
+            }
         }
     }
 }

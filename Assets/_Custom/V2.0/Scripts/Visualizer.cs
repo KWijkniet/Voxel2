@@ -3,6 +3,7 @@ using UnityEngine;
 using Custom.Voxels.Helpers;
 using System.Collections.Generic;
 using Unity.Mathematics;
+using static UnityEditor.PlayerSettings;
 
 namespace Custom.Voxels
 {
@@ -10,9 +11,24 @@ namespace Custom.Voxels
     {
         public Material mat;
         public bool showDebug = false;
-        public int chunksX = 1;
-        public int chunksZ = 1;
+        //public int chunksX = 1;
+        //public int chunksZ = 1;
         public byte generationMode = 0;
+        public Transform player;
+
+        [Range(0, 30)]
+        public int renderDistance;
+        [Range(0, 32)]
+        public int calculateDistance;
+        [Range(0, 30)]
+        public int lod0 = 0;
+        [Range(0, 30)]
+        public int lod1 = 0;
+        [Range(0, 30)]
+        public int lod2 = 0;
+
+        private Vector3 lastpos;
+        private int3 centerChunkPos;
 
         private void Start()
         {
@@ -29,21 +45,15 @@ namespace Custom.Voxels
                 shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On
             };
 
-            for (int x = 0; x < chunksX; x++)
-            {
-                for (int z = 0; z < chunksZ; z++)
-                {
-                    int3 pos = new(
-                        (int) transform.position.x + x * WorldSettings.SIZE.x,
-                        (int) transform.position.y + 0,
-                        (int) transform.position.z + z * WorldSettings.SIZE.z
-                    );
-                    WorldSettings.chunks.SetChunk(pos, new Chunk(
-                        pos,
-                        generationMode
-                    ));
-                }
-            }
+            WorldSettings.renderDistance = renderDistance;
+            WorldSettings.preloadDistance = calculateDistance;
+            WorldSettings.lodRange.Add(new System.Tuple<int, int>(lod0 * lod0, 1));
+            WorldSettings.lodRange.Add(new System.Tuple<int, int>(lod1 * lod1, 2));
+            WorldSettings.lodRange.Add(new System.Tuple<int, int>(lod2 * lod2, 4));
+
+            lastpos = player.position;
+            centerChunkPos = new int3((int)player.position.x, (int)player.position.y, (int)player.position.z);
+            SetChunksAround(centerChunkPos);
 
             foreach (Chunk item in WorldSettings.chunks.GetAll())
             {
@@ -54,7 +64,7 @@ namespace Custom.Voxels
         private void OnApplicationQuit()
         {
             WorldSettings.chunks.Clear();
-            WorldSettings.emptyVoxels.Dispose();
+            if (WorldSettings.emptyVoxels.IsCreated) WorldSettings.emptyVoxels.Dispose();
 
             foreach (Chunk item in WorldSettings.chunks.GetAll())
             {
@@ -66,11 +76,43 @@ namespace Custom.Voxels
         {
             if (WorldSettings.chunks.Count() <= 0) return;
             WorldSettings.cameraPlanes = GeometryUtility.CalculateFrustumPlanes(WorldSettings.camera);
+            WorldSettings.chunks.UpdateBatched();
 
-            foreach (Chunk item in WorldSettings.chunks.GetAll())
+            if (Vector3.Distance(lastpos, player.position) > WorldSettings.SIZE.x * 2)
             {
-                item.Update();
+                lastpos = player.position;
+                centerChunkPos = new int3((int)player.position.x, (int)player.position.y, (int)player.position.z);
+                SetChunksAround(centerChunkPos);
             }
+        }
+
+        private void SetChunksAround(int3 center)
+        {
+            int range = WorldSettings.preloadDistance;
+            int rangeSq = range * range;
+
+            int3 centerChunkPos = center / WorldSettings.SIZE;
+            int y = 0; // Fixed height
+
+            for (int x = -range; x <= range; x++)
+            {
+                for (int z = -range; z <= range; z++)
+                {
+                    int distSq = x * x + z * z;
+                    if (distSq <= rangeSq)
+                    {
+                        int3 offset = new int3(x, y, z);
+                        int3 chunkCoord = centerChunkPos + offset;
+                        int3 pos = chunkCoord * WorldSettings.SIZE;
+
+                        WorldSettings.chunks.SetChunk(pos, new Chunk(
+                            pos,
+                            generationMode
+                        ));
+                    }
+                }
+            }
+            WorldSettings.chunks.EnqueueChunksForUpdate(center);
         }
 
         void OnDrawGizmos()

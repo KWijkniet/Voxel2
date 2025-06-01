@@ -16,6 +16,7 @@ namespace Custom.Voxels.Jobs
     internal struct CalculateChunkJob : IJob
     {
         [ReadOnly] public int3 size;
+        [ReadOnly] public int3 pos;
         [ReadOnly] public NativeArray<int> heightmap;
 
         public NativeArray<byte> voxels;
@@ -25,14 +26,19 @@ namespace Custom.Voxels.Jobs
             Unity.Mathematics.Random random = new Unity.Mathematics.Random(1234);
             for (int x = 0; x < size.x; x++)
             {
-                for (int y = 0; y < size.y; y++)
+                for (int z = 0; z < size.z; z++)
                 {
-                    for (int z = 0; z < size.z; z++)
+                    int maxHeight = heightmap[x * size.x + z];
+                    for (int y = 0; y < size.y; y++)
                     {
                         int index = MathematicsHelper.XYZToIndex(x, y, z, size);
-                        
+                        //byte value = (byte) (noise.cnoise(new float2((pos.x + x) * 10000, (pos.z + z) * 10000)) > 0.5f ? 1 : 0);
+
                         // Calculate voxel type
-                        voxels[index] = (byte) (random.NextBool() ? 1 : 0);
+                        if (y <= maxHeight)
+                        {
+                            voxels[index] = 1;
+                        }
                     }
                 }
             }

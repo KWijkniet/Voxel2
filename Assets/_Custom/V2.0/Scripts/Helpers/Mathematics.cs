@@ -41,5 +41,18 @@ namespace Custom.Voxels.Helpers
         {
             return new Vector3(value.x, value.y, value.z);
         }
+
+        public static bool IsWithinDistanceSquared(int3 a, int3 b, int maxDistance)
+        {
+            int3 delta = a - b;
+            int distSq = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
+            return distSq <= maxDistance * maxDistance;
+        }
+
+        public static int GetDistanceSquared(int3 a, int3 b)
+        {
+            int3 delta = a - b;
+            return delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
+        }
     }
 }

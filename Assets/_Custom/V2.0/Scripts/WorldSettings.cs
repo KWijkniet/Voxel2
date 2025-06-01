@@ -13,6 +13,8 @@ namespace Custom.Voxels
     internal class WorldSettings
     {
         public static readonly int3 SIZE = new(16, 16, 16);
+        public static int renderDistance = 24;
+        public static int preloadDistance = 25;
         public static RenderParams RENDERPARAMS;
         public static Camera camera;
         public static Plane[] cameraPlanes;
@@ -28,5 +30,7 @@ namespace Custom.Voxels
             new int3(  0,  0, 16),
             new int3(  0,  0, -16)
         };
+
+        public static List<Tuple<int, int>> lodRange = new();
     }
 }
