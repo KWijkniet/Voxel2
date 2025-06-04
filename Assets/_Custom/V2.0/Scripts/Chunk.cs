@@ -212,7 +212,7 @@ namespace Custom.Voxels
 
         public void Render()
         {
-            if (!hasGenerated || !mesh) return;
+            if (!mesh) return;
 
             if (GeometryUtility.TestPlanesAABB(WorldSettings.cameraPlanes, bounds))
             {

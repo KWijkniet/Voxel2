@@ -155,8 +155,8 @@ MonoBehaviour:
   renderDistance: 30
   calculateDistance: 32
   lod0: 10
-  lod1: 22
-  lod2: 30
+  lod1: 20
+  lod2: 28
 --- !u!4 &485967107
 Transform:
   m_ObjectHideFlags: 0
