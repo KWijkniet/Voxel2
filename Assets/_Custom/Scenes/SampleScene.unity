@@ -589,6 +589,9 @@ MonoBehaviour:
   maxMeshPerFrame: 8
   useGreedyMeshing: 1
   useFrustumCulling: 1
+  useLOD: 1
+  useDynamicLOD: 1
+  lodLevel: 1
   testWorldSize: 4
   generateOnStart: 1
   showChunkBounds: 0

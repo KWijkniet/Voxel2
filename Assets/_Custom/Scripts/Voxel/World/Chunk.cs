@@ -16,6 +16,7 @@ namespace Voxel.World
     {
         public int3 Coord { get; private set; }
         public ChunkState State { get; private set; }
+        public LODMesher.LODLevel CurrentLOD { get; private set; } = LODMesher.LODLevel.LOD0;
 
         // Store voxels directly to avoid struct copy issues with properties
         private NativeArray<ushort> voxels;
@@ -121,6 +122,72 @@ namespace Voxel.World
             }
 
             State = ChunkState.Meshed;
+        }
+
+        /// <summary>
+        /// Generate mesh at specified LOD level.
+        /// </summary>
+        public void GenerateMeshLOD(LODMesher.LODLevel lod)
+        {
+            if (State < ChunkState.Generated) return;
+
+            using (var meshData = LODMesher.GenerateMesh(voxels, lod))
+            {
+                ApplyMeshData(meshData);
+            }
+
+            CurrentLOD = lod;
+            State = ChunkState.Meshed;
+        }
+
+        /// <summary>
+        /// Apply mesh data to the Unity mesh.
+        /// </summary>
+        private void ApplyMeshData(MeshData meshData)
+        {
+            if (meshData.vertexCount == 0)
+            {
+                if (mesh != null) mesh.Clear();
+                return;
+            }
+
+            if (mesh == null)
+            {
+                mesh = new Mesh();
+                mesh.name = $"Chunk_{Coord.x}_{Coord.y}_{Coord.z}";
+            }
+            else
+            {
+                mesh.Clear();
+            }
+
+            var vertices = new Vector3[meshData.vertexCount];
+            var normals = new Vector3[meshData.vertexCount];
+            var colors = new Color[meshData.vertexCount];
+            var triangles = new int[meshData.triangleCount];
+
+            for (int i = 0; i < meshData.vertexCount; i++)
+            {
+                vertices[i] = meshData.vertices[i];
+                normals[i] = meshData.normals[i];
+                colors[i] = new Color(
+                    meshData.colors[i].x,
+                    meshData.colors[i].y,
+                    meshData.colors[i].z,
+                    meshData.colors[i].w
+                );
+            }
+
+            for (int i = 0; i < meshData.triangleCount; i++)
+            {
+                triangles[i] = meshData.triangles[i];
+            }
+
+            mesh.vertices = vertices;
+            mesh.normals = normals;
+            mesh.colors = colors;
+            mesh.triangles = triangles;
+            mesh.RecalculateBounds();
         }
 
         /// <summary>

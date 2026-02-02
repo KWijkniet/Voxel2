@@ -3,6 +3,7 @@ using Unity.Mathematics;
 using UnityEngine;
 using Voxel.Core;
 using Voxel.Generation;
+using Voxel.Meshing;
 using Voxel.Rendering;
 
 namespace Voxel.World
@@ -32,6 +33,9 @@ namespace Voxel.World
         [SerializeField] private int maxMeshPerFrame = 8;
         [SerializeField] private bool useGreedyMeshing = true;
         [SerializeField] private bool useFrustumCulling = true;
+        [SerializeField] private bool useLOD = false;
+        [SerializeField] private bool useDynamicLOD = false;
+        [SerializeField] private Meshing.LODMesher.LODLevel lodLevel = Meshing.LODMesher.LODLevel.LOD0;
 
         [Header("Test Settings")]
         [SerializeField] private int testWorldSize = 2; // 2x2x2 chunks = 32x32x32 voxels
@@ -210,8 +214,15 @@ namespace Voxel.World
             // Generate terrain
             chunk.Generate(seed, terrainSettings);
 
-            // Generate mesh
-            chunk.GenerateMesh(blockRegistry, useGreedyMeshing);
+            // Generate mesh (with optional LOD)
+            if (useLOD && lodLevel != LODMesher.LODLevel.LOD0)
+            {
+                chunk.GenerateMeshLOD(lodLevel);
+            }
+            else
+            {
+                chunk.GenerateMesh(blockRegistry, useGreedyMeshing);
+            }
 
             // Create visual representation
             chunk.CreateGameObject(voxelMaterial, chunksParent);
@@ -309,13 +320,14 @@ namespace Voxel.World
                 ? chunkManager.QueuedMeshCount
                 : 0;
 
-            GUILayout.BeginArea(new Rect(10, 10, 300, 150));
+            GUILayout.BeginArea(new Rect(10, 10, 300, 180));
             GUILayout.Label($"Chunks: {chunkCount}");
             GUILayout.Label($"Generate Queue: {queuedGenerate}");
             GUILayout.Label($"Mesh Queue: {queuedMesh}");
             GUILayout.Label($"Update Time: {lastUpdateTime:F2}ms");
             GUILayout.Label($"Greedy Meshing: {(useGreedyMeshing ? "ON" : "OFF")}");
             GUILayout.Label($"Frustum Culling: {(useFrustumCulling ? "ON" : "OFF")}");
+            GUILayout.Label($"LOD: {(useLOD ? lodLevel.ToString() : "OFF")}");
             GUILayout.EndArea();
         }
 
