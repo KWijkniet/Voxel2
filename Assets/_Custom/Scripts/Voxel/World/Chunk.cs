@@ -62,11 +62,14 @@ namespace Voxel.World
         /// <summary>
         /// Generate mesh from voxel data.
         /// </summary>
-        public void GenerateMesh(BlockRegistry blockRegistry)
+        /// <param name="useGreedyMeshing">Use greedy meshing for better performance (default true)</param>
+        public void GenerateMesh(BlockRegistry blockRegistry, bool useGreedyMeshing = true)
         {
             if (State < ChunkState.Generated) return;
 
-            using (var meshData = NaiveMesher.GenerateMesh(voxels, blockRegistry))
+            using (var meshData = useGreedyMeshing
+                ? GreedyMesher.GenerateMesh(voxels)
+                : NaiveMesher.GenerateMesh(voxels, blockRegistry))
             {
                 if (meshData.vertexCount == 0)
                 {
@@ -154,6 +157,29 @@ namespace Voxel.World
             if (meshFilter != null && mesh != null)
             {
                 meshFilter.mesh = mesh;
+            }
+        }
+
+        /// <summary>
+        /// Set mesh from external source (used by ChunkManager for async meshing).
+        /// </summary>
+        public void SetMesh(Mesh newMesh)
+        {
+            if (mesh != null && mesh != newMesh)
+            {
+                if (Application.isPlaying)
+                    Object.Destroy(mesh);
+                else
+                    Object.DestroyImmediate(mesh);
+            }
+
+            mesh = newMesh;
+            State = ChunkState.Meshed;
+
+            if (meshFilter != null)
+            {
+                meshFilter.mesh = mesh;
+                State = ChunkState.Ready;
             }
         }
 
