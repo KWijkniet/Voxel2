@@ -83,8 +83,8 @@ public struct ChunkRenderJob : IJob
 
     public void Execute()
     {
-        GreedyMesherThreat gm = new(voxelData, chunkSize.x, chunkSize.y, chunkSize.z, chunkPos);
-        meshBuffer = gm.GenerateMesh(meshBuffer, false);
+        //GreedyMesherThreat gm = new(voxelData, chunkSize.x, chunkSize.y, chunkSize.z, chunkPos);
+        //meshBuffer = gm.GenerateMesh(meshBuffer, false);
     }
 }
 

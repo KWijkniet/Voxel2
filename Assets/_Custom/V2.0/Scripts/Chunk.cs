@@ -89,7 +89,7 @@ namespace Custom.Voxels
                     {
                         float rawNoise = noise.cnoise(new float2((pos.x + x + 100000) * 0.1f, (pos.z + z + 100000) * 0.1f));
                         float normalNoise = (rawNoise + 1f) * 0.5f;
-                        int height = (int)math.round(normalNoise * WorldSettings.SIZE.y);
+                        int height = (int)math.round(normalNoise * (WorldSettings.SIZE.y * 2));
                         heightmap[index] = height;
                         index++;
                     }

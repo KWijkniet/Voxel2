@@ -45,34 +45,41 @@ namespace Custom.Voxels.Generators
                 {
                     for (int z = 0; z < newSize.z; z++)
                     {
-                        int solidCount = 0;
-
-                        for (int dz = 0; dz < divider; dz++)
-                        {
-                            for (int dy = 0; dy < divider; dy++)
-                            {
-                                for (int dx = 0; dx < divider; dx++)
-                                {
-                                    int srcX = x * divider + dx;
-                                    int srcY = y * divider + dy;
-                                    int srcZ = z * divider + dz;
-
-                                    int srcIndex = MathematicsHelper.XYZToIndex(srcX, srcY, srcZ, size);
-                                    if (voxels[srcIndex] > 0)
-                                    {
-                                        solidCount++;
-                                    }
-                                }
-                            }
-                        }
-
                         int destIndex = MathematicsHelper.XYZToIndex(x, y, z, newSize);
-                        lowRes[destIndex] = (byte)(solidCount >= 3 ? 1 : 0);
+                        lowRes[destIndex] = DownsamplePoint(voxels, new int3(x, y, z), divider, size);
                     }
                 }
             }
 
             return lowRes;
+        }
+
+        public static byte DownsamplePoint(NativeArray<byte> voxels, int3 pos, int divider, int3 size)
+        {
+            int solidCount = 0;
+            int totalCount = 0;
+
+            for (int dz = 0; dz < divider; dz++)
+            {
+                for (int dy = 0; dy < divider; dy++)
+                {
+                    for (int dx = 0; dx < divider; dx++)
+                    {
+                        int srcX = pos.x * divider + dx;
+                        int srcY = pos.y * divider + dy;
+                        int srcZ = pos.z * divider + dz;
+
+                        int srcIndex = MathematicsHelper.XYZToIndex(srcX, srcY, srcZ, size);
+                        if (srcIndex > 0 && srcIndex < size.x * size.y * size.z)
+                        {
+                            if (voxels[srcIndex] > 0) solidCount++;
+                            totalCount++;
+                        }
+                    }
+                }
+            }
+
+            return (byte)(solidCount >= totalCount ? 1 : 0);
         }
     }
 }

@@ -35,7 +35,7 @@ namespace Custom.Voxels.Jobs
                         //byte value = (byte) (noise.cnoise(new float2((pos.x + x) * 10000, (pos.z + z) * 10000)) > 0.5f ? 1 : 0);
 
                         // Calculate voxel type
-                        if (y <= maxHeight)
+                        if (pos.y + y <= maxHeight)
                         {
                             voxels[index] = 1;
                         }

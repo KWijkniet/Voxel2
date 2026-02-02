@@ -92,23 +92,25 @@ namespace Custom.Voxels
             int rangeSq = range * range;
 
             int3 centerChunkPos = center / WorldSettings.SIZE;
-            int y = 0; // Fixed height
 
             for (int x = -range; x <= range; x++)
             {
-                for (int z = -range; z <= range; z++)
+                for (int y = -range; y <= range; y++)
                 {
-                    int distSq = x * x + z * z;
-                    if (distSq <= rangeSq)
+                    for (int z = -range; z <= range; z++)
                     {
-                        int3 offset = new int3(x, y, z);
-                        int3 chunkCoord = centerChunkPos + offset;
-                        int3 pos = chunkCoord * WorldSettings.SIZE;
+                        int distSq = x * x + z * z;
+                        if (distSq <= rangeSq)
+                        {
+                            int3 offset = new int3(x, y, z);
+                            int3 chunkCoord = centerChunkPos + offset;
+                            int3 pos = chunkCoord * WorldSettings.SIZE;
 
-                        WorldSettings.chunks.SetChunk(pos, new Chunk(
-                            pos,
-                            generationMode
-                        ));
+                            WorldSettings.chunks.SetChunk(pos, new Chunk(
+                                pos,
+                                generationMode
+                            ));
+                        }
                     }
                 }
             }

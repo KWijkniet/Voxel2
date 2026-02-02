@@ -27,7 +27,7 @@ namespace Custom.Voxels.Jobs
             {
                 NativeArray<byte> lodVoxels = new LevelOfDetail(size, voxels, divider).DownSample();
                 int3 newSize = divider == 1 ? size : new int3(size.x / divider, size.y / divider, size.z / divider);
-                new GreedyMesh(newSize, lodVoxels, vertices, triangles, uvs, neighbours);
+                new GreedyMesh(newSize, lodVoxels, vertices, triangles, uvs, neighbours, divider);
                 lodVoxels.Dispose();
 
                 if (divider != 1)

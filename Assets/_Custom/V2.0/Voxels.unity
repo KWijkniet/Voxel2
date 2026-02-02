@@ -152,11 +152,11 @@ MonoBehaviour:
   showDebug: 0
   generationMode: 2
   player: {fileID: 1582171315}
-  renderDistance: 30
-  calculateDistance: 32
-  lod0: 10
-  lod1: 20
-  lod2: 28
+  renderDistance: 10
+  calculateDistance: 12
+  lod0: 8
+  lod1: 9
+  lod2: 10
 --- !u!4 &485967107
 Transform:
   m_ObjectHideFlags: 0

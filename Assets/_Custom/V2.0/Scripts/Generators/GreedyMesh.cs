@@ -26,11 +26,13 @@ namespace Custom.Voxels.Generators
         private NativeArray<byte> visited;
         private NativeList<GreedyVoxel> greedyVoxels;
         private Neighbours neighbours;
+        private int divider;
 
-        public GreedyMesh(int3 size, NativeArray<byte> voxels, NativeList<float3> vertices, NativeList<int> triangles, NativeList<float2> uvs, Neighbours neighbours)
+        public GreedyMesh(int3 size, NativeArray<byte> voxels, NativeList<float3> vertices, NativeList<int> triangles, NativeList<float2> uvs, Neighbours neighbours, int divider = 1)
         {
             this.size = size;
             this.voxels = voxels;
+            this.divider = divider;
 
             this.vertices = vertices;
             this.triangles = triangles;
@@ -386,7 +388,12 @@ namespace Custom.Voxels.Generators
             else if (dir.z < 0) res = neighbours.zNeg;
 
             if (!res.IsCreated || res.Length <= 0) return 0;
-            else return res[MathematicsHelper.XYZToIndex(pos.x, pos.y, pos.z, size)];
+            else
+            {
+                return LevelOfDetail.DownsamplePoint(res, pos, divider, size);
+            }
+            //else if (res.Length != size.x * size.y * size.z) return 0;
+            //else return res[MathematicsHelper.XYZToIndex(pos.x, pos.y, pos.z, size)];
         }
 
         private static int[] faceTriangles = {
