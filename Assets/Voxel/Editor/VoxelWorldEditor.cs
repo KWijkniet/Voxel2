@@ -91,6 +91,74 @@ public class VoxelWorldEditor : Editor
         EditorUtility.SetDirty(world);
     }
 
+    // ── Scene view gizmos ─────────────────────────────────────────────────────
+
+    private void OnSceneGUI()
+    {
+        var world = (VoxelWorld)target;
+
+        // Use the Scene view camera so the frustum reflects what you see in the Scene window
+        var sceneCam = SceneView.lastActiveSceneView?.camera;
+        if (sceneCam == null) return;
+
+        var planes    = GeometryUtility.CalculateFrustumPlanes(sceneCam);
+        var origin    = world.player != null ? world.player.position : world.transform.position;
+        var playerChunk = new Vector3Int(
+            Mathf.FloorToInt(origin.x / PaletteChunk.Size),
+            0,
+            Mathf.FloorToInt(origin.z / PaletteChunk.Size));
+
+        float s              = PaletteChunk.Size;
+        float bypassWorldSq  = (world.frustumBypassRadius * s) * (world.frustumBypassRadius * s);
+
+        for (int x = -world.viewDistance; x <= world.viewDistance; x++)
+        for (int z = -world.viewDistance; z <= world.viewDistance; z++)
+        for (int y = 0; y < world.verticalChunks; y++)
+        {
+            var coord  = new Vector3Int(playerChunk.x + x, y, playerChunk.z + z);
+            var center = new Vector3(coord.x * s + s * 0.5f, coord.y * s + s * 0.5f, coord.z * s + s * 0.5f);
+            var bounds = new Bounds(center, Vector3.one * s);
+
+            float  distSq      = (center - origin).sqrMagnitude;
+            bool   inBypass    = distSq <= bypassWorldSq;
+            bool   inFrustum   = GeometryUtility.TestPlanesAABB(planes, bounds);
+            bool   wouldLoad   = inBypass || inFrustum;
+
+            if (wouldLoad)
+            {
+                // Green = would be generated
+                Handles.color = inBypass
+                    ? new Color(0.2f, 1f, 0.2f, 0.6f)   // bright green = bypass radius
+                    : new Color(0.2f, 0.8f, 1f, 0.4f);   // cyan = frustum-visible
+            }
+            else
+            {
+                // Red = culled, would not be generated
+                Handles.color = new Color(1f, 0.2f, 0.2f, 0.15f);
+            }
+
+            Handles.DrawWireCube(center, Vector3.one * s);
+        }
+
+        // Legend in the top-left of the Scene view
+        Handles.BeginGUI();
+        var rect = new Rect(10, 10, 200, 76);
+        GUI.Box(rect, GUIContent.none);
+        GUI.Label(new Rect(14, 12, 190, 18), "Frustum Culling Preview");
+        DrawLegendEntry(new Rect(14, 30, 190, 16), new Color(0.2f, 1f, 0.2f), "Bypass radius (always load)");
+        DrawLegendEntry(new Rect(14, 48, 190, 16), new Color(0.2f, 0.8f, 1f), "In frustum (would load)");
+        DrawLegendEntry(new Rect(14, 66, 190, 16), new Color(1f, 0.2f, 0.2f), "Culled (would skip)");
+        Handles.EndGUI();
+    }
+
+    private static void DrawLegendEntry(Rect rect, Color colour, string label)
+    {
+        EditorGUI.DrawRect(new Rect(rect.x, rect.y + 2, 12, 12), colour);
+        GUI.Label(new Rect(rect.x + 16, rect.y, rect.width - 16, rect.height), label);
+    }
+
+    // ── Chunk data generation ─────────────────────────────────────────────────
+
     private PaletteChunk GenerateChunk(VoxelWorld world, Vector3Int coord)
     {
         var chunk = new PaletteChunk();
