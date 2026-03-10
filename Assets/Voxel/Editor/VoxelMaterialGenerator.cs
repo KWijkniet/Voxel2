@@ -4,7 +4,7 @@ using UnityEditor;
 
 /// <summary>
 /// Generates a pixel-art texture atlas and a URP Lit material from it.
-/// Atlas layout: [Stone | Dirt | Grass] — one texel per block type.
+/// Atlas layout: [Stone | Dirt | Grass | Sand | Water | Snow] — one texel per block type.
 /// Point filtering ensures clean colour boundaries with no bleed.
 /// </summary>
 public static class VoxelMaterialGenerator
@@ -13,12 +13,15 @@ public static class VoxelMaterialGenerator
     private const string TexturePath   = OutputFolder + "/VoxelAtlas.png";
     private const string MaterialPath  = OutputFolder + "/VoxelTerrain.mat";
 
-    // One colour per solid block type (order matches BlockType: Stone=1, Dirt=2, Grass=3)
+    // One colour per solid block type (order matches BlockType: Stone=1 … Snow=6)
     private static readonly Color32[] BlockColours =
     {
         new Color32(120, 120, 120, 255), // Stone  — grey
         new Color32(139,  90,  43, 255), // Dirt   — brown
         new Color32( 67, 155,  40, 255), // Grass  — green
+        new Color32(194, 178, 128, 255), // Sand   — tan
+        new Color32( 30, 100, 200, 255), // Water  — blue
+        new Color32(220, 235, 255, 255), // Snow   — ice white
     };
 
     /// <summary>Generates the atlas texture and material, saves them as assets, and returns the material.</summary>
@@ -86,6 +89,24 @@ public static class VoxelMaterialGenerator
 
         var mat = new Material(shader) { name = "VoxelTerrain" };
         mat.mainTexture = atlas;
+
+        // ── Force fully opaque rendering ──────────────────────────────────────
+        // URP Lit created programmatically does not set these correctly by default,
+        // causing ZWrite=Off / transparent blending → large triangular Z-fighting.
+        if (mat.HasProperty("_Surface"))   mat.SetFloat("_Surface",  0f); // 0 = Opaque
+        if (mat.HasProperty("_Blend"))     mat.SetFloat("_Blend",    0f); // Alpha mode
+        if (mat.HasProperty("_SrcBlend"))  mat.SetInt("_SrcBlend",   1);  // BlendMode.One
+        if (mat.HasProperty("_DstBlend"))  mat.SetInt("_DstBlend",   0);  // BlendMode.Zero
+        if (mat.HasProperty("_ZWrite"))    mat.SetInt("_ZWrite",     1);  // ZWrite On
+        if (mat.HasProperty("_Cull"))      mat.SetInt("_Cull",       2);  // CullMode.Back
+        mat.renderQueue = 2000; // RenderQueue.Geometry
+
+        mat.DisableKeyword("_SURFACE_TYPE_TRANSPARENT");
+        mat.DisableKeyword("_ALPHATEST_ON");
+        mat.DisableKeyword("_ALPHABLEND_ON");
+        mat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+        mat.EnableKeyword("_EMISSION"); // suppress shader variant warnings
+
         // Smooth = 0, Metallic = 0 for a matte voxel look
         if (mat.HasProperty("_Smoothness")) mat.SetFloat("_Smoothness", 0f);
         if (mat.HasProperty("_Metallic"))   mat.SetFloat("_Metallic",   0f);

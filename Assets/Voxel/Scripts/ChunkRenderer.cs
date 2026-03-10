@@ -186,6 +186,11 @@ public class ChunkRenderer : MonoBehaviour
                     // Cross-chunk boundary: sample the first/last cell of the neighbour
                     pos[sliceAxis] = neighborCell < 0 ? size - step : 0;
                     neighborSolid  = neighbour != null && neighbour.IsSolid(pos[0], pos[1], pos[2]);
+                    // Water at a chunk boundary with no loaded neighbour: treat as solid to prevent
+                    // Z-fighting. Two chunks with water columns each render a face at the same
+                    // world position when loaded out of order. The face reappears once both load.
+                    if (here == BlockType.Water && neighbour == null)
+                        neighborSolid = true;
                 }
 
                 mask[u + v * cells] = neighborSolid ? (byte)0 : here;
@@ -329,6 +334,9 @@ public class ChunkRenderer : MonoBehaviour
                     // Cross-region boundary — sample the first/last cell of the neighbour
                     pos[sliceAxis] = neighborCell < 0 ? sizes[sliceAxis] - step : 0;
                     neighborSolid  = neighbour != null && neighbour.IsSolid(pos[0], pos[1], pos[2]);
+                    // Same water boundary fix as the chunk mesher above
+                    if (here == BlockType.Water && neighbour == null)
+                        neighborSolid = true;
                 }
 
                 mask[u + v * cellsU] = neighborSolid ? (byte)0 : here;

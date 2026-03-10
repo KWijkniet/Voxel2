@@ -4,7 +4,11 @@ public static class BlockType
     public const byte Stone = 1;
     public const byte Dirt  = 2;
     public const byte Grass = 3;
+    public const byte Sand  = 4;
+    public const byte Water = 5;
+    public const byte Snow  = 6;
 
-    // Number of solid block types in the texture atlas (Air is not in the atlas)
-    public const int AtlasTileCount = 3;
+    // Number of solid block types in the texture atlas (Air is not in the atlas).
+    // Atlas layout: [Stone | Dirt | Grass | Sand | Water | Snow]
+    public const int AtlasTileCount = 6;
 }

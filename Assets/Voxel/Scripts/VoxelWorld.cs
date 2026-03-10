@@ -24,10 +24,38 @@ public class VoxelWorld : MonoBehaviour
     public int       verticalChunks = 3;
     public Transform player;
 
-    [Header("Terrain")]
-    public float noiseScale    = 0.04f;
-    public int   terrainHeight = 32;
-    public int   baseHeight    = 8;
+    [Header("Terrain — Water")]
+    public int seaLevel       = 20;
+
+    [Header("Terrain — Heights")]
+    public int   baseHeight     = 2;
+    public int   plainsHeight   = 22;
+    public int   mountainHeight = 80;
+    public int   oceanDepth     = 12;
+
+    [Header("Terrain — Noise")]
+    [Tooltip("Base frequency (smaller = larger features)")]
+    public float noiseScale  = 0.004f;
+    [Range(1, 8)]
+    public int   octaves     = 5;
+    [Range(0f, 1f)]
+    public float persistence = 0.5f;
+    [Range(1f, 4f)]
+    public float lacunarity  = 2.0f;
+
+    [Header("Terrain — Biome")]
+    [Tooltip("Scale of biome transitions (very low = large biomes)")]
+    public float biomeScale = 0.0008f;
+
+    [Header("Terrain — Domain Warp")]
+    [Tooltip("Max coordinate warp in voxels (0 = disable)")]
+    public float warpStrength = 25f;
+    public float warpScale    = 0.005f;
+
+    [Header("Terrain — Block Layers")]
+    public int dirtDepth      = 4;
+    public int sandBeachWidth = 3;
+    public int snowAltitude   = 75;
 
     [Header("Rendering")]
     public Material chunkMaterial;
@@ -316,14 +344,14 @@ public class VoxelWorld : MonoBehaviour
         _inFlight.Add(coord);
         var existing   = GetChunk(coord);
         var neighbours = buildMesh ? ChunkRenderer.FetchNeighbours(coord, GetChunk) : null;
-        float ns = noiseScale; int th = terrainHeight; int bh = baseHeight;
+        var settings   = GetTerrainSettings();
 
         Task.Run(async () =>
         {
             await _semaphore.WaitAsync();
             try
             {
-                var chunk = existing ?? GenerateChunkData(coord, ns, th, bh);
+                var chunk = existing ?? GenerateChunkData(coord, settings);
                 var mesh  = buildMesh ? ChunkRenderer.BuildMeshData(chunk, neighbours, 0) : null;
                 _readyQueue.Enqueue(new ChunkBuildResult(coord, chunk, mesh));
             }
@@ -462,8 +490,26 @@ public class VoxelWorld : MonoBehaviour
 
     // ── Terrain generation ────────────────────────────────────────────────────
 
-    private static PaletteChunk GenerateChunkData(Vector3Int coord,
-                                                   float noiseScale, int terrainHeight, int baseHeight)
+    public TerrainSettings GetTerrainSettings() => new TerrainSettings
+    {
+        seaLevel       = seaLevel,
+        baseHeight     = baseHeight,
+        plainsHeight   = plainsHeight,
+        mountainHeight = mountainHeight,
+        oceanDepth     = oceanDepth,
+        noiseScale     = noiseScale,
+        octaves        = octaves,
+        persistence    = persistence,
+        lacunarity     = lacunarity,
+        biomeScale     = biomeScale,
+        warpStrength   = warpStrength,
+        warpScale      = warpScale,
+        dirtDepth      = dirtDepth,
+        sandBeachWidth = sandBeachWidth,
+        snowAltitude   = snowAltitude,
+    };
+
+    private static PaletteChunk GenerateChunkData(Vector3Int coord, in TerrainSettings s)
     {
         var chunk   = new PaletteChunk();
         int offsetX = coord.x * PaletteChunk.Size;
@@ -473,17 +519,14 @@ public class VoxelWorld : MonoBehaviour
         for (int z = 0; z < PaletteChunk.Size; z++)
         for (int x = 0; x < PaletteChunk.Size; x++)
         {
-            float noise   = Mathf.PerlinNoise((offsetX + x) * noiseScale, (offsetZ + z) * noiseScale);
-            int   surface = baseHeight + Mathf.RoundToInt(noise * terrainHeight);
+            // Pre-compute surface once per column — TerrainGenerator.GetBlock reuses it
+            int surface = TerrainGenerator.GetSurface(offsetX + x, offsetZ + z, s);
+
             for (int y = 0; y < PaletteChunk.Size; y++)
             {
-                int worldY = offsetY + y;
-                byte block;
-                if      (worldY > surface)      block = BlockType.Air;
-                else if (worldY == surface)     block = BlockType.Grass;
-                else if (worldY >= surface - 3) block = BlockType.Dirt;
-                else                            block = BlockType.Stone;
-                chunk.SetBlock(x, y, z, block);
+                byte block = TerrainGenerator.GetBlock(offsetX + x, offsetY + y, offsetZ + z, surface, s);
+                if (block != BlockType.Air)
+                    chunk.SetBlock(x, y, z, block);
             }
         }
         return chunk;

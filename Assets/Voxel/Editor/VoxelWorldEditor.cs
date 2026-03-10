@@ -194,34 +194,23 @@ public class VoxelWorldEditor : Editor
 
     private PaletteChunk GenerateChunk(VoxelWorld world, Vector3Int coord)
     {
-        var chunk = new PaletteChunk();
-        int offsetX = coord.x * PaletteChunk.Size;
-        int offsetY = coord.y * PaletteChunk.Size;
-        int offsetZ = coord.z * PaletteChunk.Size;
+        var chunk    = new PaletteChunk();
+        var settings = world.GetTerrainSettings();
+        int offsetX  = coord.x * PaletteChunk.Size;
+        int offsetY  = coord.y * PaletteChunk.Size;
+        int offsetZ  = coord.z * PaletteChunk.Size;
 
         for (int z = 0; z < PaletteChunk.Size; z++)
         for (int x = 0; x < PaletteChunk.Size; x++)
         {
-            int worldX = offsetX + x;
-            int worldZ = offsetZ + z;
-
-            float noise   = Mathf.PerlinNoise(worldX * world.noiseScale, worldZ * world.noiseScale);
-            int   surface = world.baseHeight + Mathf.RoundToInt(noise * world.terrainHeight);
-
+            int surface = TerrainGenerator.GetSurface(offsetX + x, offsetZ + z, settings);
             for (int y = 0; y < PaletteChunk.Size; y++)
             {
-                int worldY = offsetY + y;
-
-                byte block;
-                if      (worldY > surface)      block = BlockType.Air;
-                else if (worldY == surface)     block = BlockType.Grass;
-                else if (worldY >= surface - 3) block = BlockType.Dirt;
-                else                            block = BlockType.Stone;
-
-                chunk.SetBlock(x, y, z, block);
+                byte block = TerrainGenerator.GetBlock(offsetX + x, offsetY + y, offsetZ + z, surface, settings);
+                if (block != BlockType.Air)
+                    chunk.SetBlock(x, y, z, block);
             }
         }
-
         return chunk;
     }
 }
