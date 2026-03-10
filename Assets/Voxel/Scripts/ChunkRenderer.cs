@@ -93,7 +93,9 @@ public class ChunkRenderer : MonoBehaviour
 
         _meshRenderer.sharedMaterial = material;
         if (data.IsEmpty) { _meshFilter.sharedMesh = null; return; }
-        _meshFilter.sharedMesh = UploadMesh(data.Vertices, data.Normals, data.UVs, data.Triangles);
+        // Auto-select index format: regions can exceed the 65 535 UInt16 limit
+        var fmt = data.Vertices.Length > 65535 ? IndexFormat.UInt32 : IndexFormat.UInt16;
+        _meshFilter.sharedMesh = UploadMesh(data.Vertices, data.Normals, data.UVs, data.Triangles, fmt);
     }
 
     public void Clear()
@@ -240,6 +242,150 @@ public class ChunkRenderer : MonoBehaviour
         }
     }
 
+    // ── Region mesher (64×vc*16×64 voxel space) ──────────────────────────────
+
+    // Neighbour directions for regions (horizontal only — regions span full height)
+    public static readonly Vector3Int[] RegionNeighbourDirs =
+    {
+        Vector3Int.right,
+        Vector3Int.left,
+        Vector3Int.up,           // no vertical region neighbours — will be null
+        Vector3Int.down,
+        new Vector3Int(0, 0, 1),
+        new Vector3Int(0, 0,-1),
+    };
+
+    /// <summary>
+    /// Builds a region mesh on any thread. Neighbours are horizontally adjacent regions (+X,-X,+Z,-Z);
+    /// the ±Y entries are ignored (regions span the full world height).
+    /// step = voxels per LOD cell (4, 8, or 16 for LOD 1, 2, 3).
+    /// </summary>
+    public static MeshData BuildRegionMeshData(RegionData region, RegionData[] neighbours, int step)
+    {
+        var verts = new List<Vector3>();
+        var norms = new List<Vector3>();
+        var uvs   = new List<Vector2>();
+        var tris  = new List<int>();
+        // Mask size = max(cellsU × cellsV) across all 6 face orientations.
+        // X/Z faces use VoxelSizeY and VoxelSizeZ/X as their two tangent axes,
+        // so if verticalChunks > 4 the Y dimension exceeds 64 and needs a larger buffer.
+        int maskSize = Mathf.Max(
+            (region.VoxelSizeY / step) * (region.VoxelSizeZ / step), // X faces
+            (region.VoxelSizeX / step) * (region.VoxelSizeZ / step), // Y faces
+            (region.VoxelSizeX / step) * (region.VoxelSizeY / step)  // Z faces
+        );
+        var mask = new byte[maskSize];
+
+        GreedyMeshFaceRegion(region, neighbours[0], 0, 1, 2, Vector3.right,   false, verts, norms, uvs, tris, mask, step);
+        GreedyMeshFaceRegion(region, neighbours[1], 0, 1, 2, Vector3.left,    true,  verts, norms, uvs, tris, mask, step);
+        GreedyMeshFaceRegion(region, neighbours[2], 1, 2, 0, Vector3.up,      false, verts, norms, uvs, tris, mask, step);
+        GreedyMeshFaceRegion(region, neighbours[3], 1, 2, 0, Vector3.down,    true,  verts, norms, uvs, tris, mask, step);
+        GreedyMeshFaceRegion(region, neighbours[4], 2, 0, 1, Vector3.forward, false, verts, norms, uvs, tris, mask, step);
+        GreedyMeshFaceRegion(region, neighbours[5], 2, 0, 1, Vector3.back,    true,  verts, norms, uvs, tris, mask, step);
+
+        // Return raw arrays only — Mesh creation must happen on the main thread
+        return new MeshData(verts.ToArray(), norms.ToArray(), uvs.ToArray(), tris.ToArray());
+    }
+
+    /// <summary>
+    /// Greedy face mesher for a RegionData.
+    /// Operates in the region's variable-size voxel space; mask is indexed in cell space.
+    /// </summary>
+    private static void GreedyMeshFaceRegion(
+        RegionData region, RegionData neighbour,
+        int sliceAxis, int uAxis, int vAxis, Vector3 normalVec, bool backFace,
+        List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<int> tris,
+        byte[] mask, int step)
+    {
+        int[] sizes   = { region.VoxelSizeX, region.VoxelSizeY, region.VoxelSizeZ };
+        int cellsSlice = sizes[sliceAxis] / step;
+        int cellsU     = sizes[uAxis]     / step;
+        int cellsV     = sizes[vAxis]     / step;
+        var pos        = new int[3];
+
+        for (int slice = 0; slice < cellsSlice; slice++)
+        {
+            // Build mask in cell space
+            for (int v = 0; v < cellsV; v++)
+            for (int u = 0; u < cellsU; u++)
+            {
+                pos[sliceAxis] = slice * step;
+                pos[uAxis]     = u     * step;
+                pos[vAxis]     = v     * step;
+
+                byte here = region.GetBlock(pos[0], pos[1], pos[2]);
+                if (here == BlockType.Air) { mask[u + v * cellsU] = 0; continue; }
+
+                int  neighborCell  = slice + (backFace ? -1 : 1);
+                bool neighborSolid;
+
+                if (neighborCell >= 0 && neighborCell < cellsSlice)
+                {
+                    pos[sliceAxis] = neighborCell * step;
+                    neighborSolid  = region.IsSolid(pos[0], pos[1], pos[2]);
+                }
+                else
+                {
+                    // Cross-region boundary — sample the first/last cell of the neighbour
+                    pos[sliceAxis] = neighborCell < 0 ? sizes[sliceAxis] - step : 0;
+                    neighborSolid  = neighbour != null && neighbour.IsSolid(pos[0], pos[1], pos[2]);
+                }
+
+                mask[u + v * cellsU] = neighborSolid ? (byte)0 : here;
+            }
+
+            // Greedy merge
+            for (int v = 0; v < cellsV; v++)
+            for (int u = 0; u < cellsU; )
+            {
+                byte blockType = mask[u + v * cellsU];
+                if (blockType == BlockType.Air) { u++; continue; }
+
+                int w = 1;
+                while (u + w < cellsU && mask[u + w + v * cellsU] == blockType) w++;
+
+                int h = 1; bool heightDone = false;
+                while (v + h < cellsV && !heightDone)
+                {
+                    for (int k = 0; k < w; k++)
+                        if (mask[u + k + (v + h) * cellsU] != blockType) { heightDone = true; break; }
+                    if (!heightDone) h++;
+                }
+
+                pos[sliceAxis] = slice * step + (backFace ? 0 : step);
+                pos[uAxis]     = u     * step;
+                pos[vAxis]     = v     * step;
+
+                var corner = new Vector3(pos[0], pos[1], pos[2]);
+                var du = Vector3.zero; du[uAxis] = w * step;
+                var dv = Vector3.zero; dv[vAxis] = h * step;
+
+                int idx = verts.Count;
+                verts.Add(corner); verts.Add(corner + du);
+                verts.Add(corner + du + dv); verts.Add(corner + dv);
+                norms.Add(normalVec); norms.Add(normalVec);
+                norms.Add(normalVec); norms.Add(normalVec);
+
+                float tileU = (blockType - 1 + 0.5f) / BlockType.AtlasTileCount;
+                uvs.Add(new Vector2(tileU, 0f)); uvs.Add(new Vector2(tileU, 0f));
+                uvs.Add(new Vector2(tileU, 1f)); uvs.Add(new Vector2(tileU, 1f));
+
+                if (backFace)
+                { tris.Add(idx); tris.Add(idx+2); tris.Add(idx+1); tris.Add(idx); tris.Add(idx+3); tris.Add(idx+2); }
+                else
+                { tris.Add(idx); tris.Add(idx+1); tris.Add(idx+2); tris.Add(idx); tris.Add(idx+2); tris.Add(idx+3); }
+
+                for (int vv = 0; vv < h; vv++)
+                for (int uu = 0; uu < w; uu++)
+                    mask[u + uu + (v + vv) * cellsU] = 0;
+
+                u += w;
+            }
+        }
+    }
+
+    // ── Shared upload helpers ─────────────────────────────────────────────────
+
     private static Mesh UploadMesh(List<Vector3> verts, List<Vector3> norms,
                                     List<Vector2> uvs,   List<int>     tris)
     {
@@ -251,10 +397,11 @@ public class ChunkRenderer : MonoBehaviour
         return mesh;
     }
 
-    private static Mesh UploadMesh(Vector3[] verts, Vector3[] norms, Vector2[] uvs, int[] tris)
+    private static Mesh UploadMesh(Vector3[] verts, Vector3[] norms, Vector2[] uvs, int[] tris,
+                                    IndexFormat fmt = IndexFormat.UInt16)
     {
         var mesh = new Mesh { name = "Chunk" };
-        mesh.indexFormat = IndexFormat.UInt16;
+        mesh.indexFormat = fmt;
         mesh.SetVertices(verts); mesh.SetNormals(norms);
         mesh.SetUVs(0, uvs); mesh.SetTriangles(tris, 0);
         mesh.RecalculateBounds(); mesh.UploadMeshData(true);

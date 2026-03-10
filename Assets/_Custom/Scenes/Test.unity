@@ -246,18 +246,18 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VoxelWorld
   viewDistance: 6
-  verticalChunks: 3
+  verticalChunks: 6
   player: {fileID: 0}
   noiseScale: 0.04
-  terrainHeight: 32
+  terrainHeight: 64
   baseHeight: 1
   chunkMaterial: {fileID: 2100000, guid: 915577a1428a176489884433fbc104de, type: 2}
-  maxConcurrentTasks: 4
-  maxApplyPerFrame: 2
-  lodLevels: 1
+  maxConcurrentTasks: 8
+  maxApplyPerFrame: 4
+  lodLevels: 2
   frustumBypassRadius: 2
   cameraRotationThreshold: 0.98
-  disableOutsideFrustum: 0
+  disableOutsideFrustum: 1
 --- !u!4 &989120344
 Transform:
   m_ObjectHideFlags: 0
@@ -359,13 +359,13 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1120276401}
   serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 34.2, z: -10}
+  m_LocalRotation: {x: 0.196374, y: 0, z: 0, w: 0.98052907}
+  m_LocalPosition: {x: 0, y: 66.91, z: -10}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+  m_LocalEulerAnglesHint: {x: 22.65, y: 0, z: 0}
 --- !u!114 &1120276405
 MonoBehaviour:
   m_ObjectHideFlags: 0

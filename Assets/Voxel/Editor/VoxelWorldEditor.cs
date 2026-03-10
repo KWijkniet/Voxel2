@@ -97,57 +97,90 @@ public class VoxelWorldEditor : Editor
     {
         var world = (VoxelWorld)target;
 
-        // Use the Scene view camera so the frustum reflects what you see in the Scene window
         var sceneCam = SceneView.lastActiveSceneView?.camera;
         if (sceneCam == null) return;
 
-        var planes    = GeometryUtility.CalculateFrustumPlanes(sceneCam);
-        var origin    = world.player != null ? world.player.position : world.transform.position;
-        var playerChunk = new Vector3Int(
-            Mathf.FloorToInt(origin.x / PaletteChunk.Size),
-            0,
+        var planes   = GeometryUtility.CalculateFrustumPlanes(sceneCam);
+        var origin   = world.player != null ? world.player.position : world.transform.position;
+        var pChunk   = new Vector3Int(
+            Mathf.FloorToInt(origin.x / PaletteChunk.Size), 0,
             Mathf.FloorToInt(origin.z / PaletteChunk.Size));
 
-        float s              = PaletteChunk.Size;
-        float bypassWorldSq  = (world.frustumBypassRadius * s) * (world.frustumBypassRadius * s);
+        float cs        = PaletteChunk.Size;
+        float bypassSq  = (world.frustumBypassRadius * cs) * (world.frustumBypassRadius * cs);
+        int   aligned   = world.AlignedViewDistance;
+        int   maxR      = aligned * (1 << world.lodLevels);
 
-        for (int x = -world.viewDistance; x <= world.viewDistance; x++)
-        for (int z = -world.viewDistance; z <= world.viewDistance; z++)
+        // ── LOD 0 zone: individual chunks ─────────────────────────────────────
+        for (int x = -aligned; x <= aligned; x++)
+        for (int z = -aligned; z <= aligned; z++)
         for (int y = 0; y < world.verticalChunks; y++)
         {
-            var coord  = new Vector3Int(playerChunk.x + x, y, playerChunk.z + z);
-            var center = new Vector3(coord.x * s + s * 0.5f, coord.y * s + s * 0.5f, coord.z * s + s * 0.5f);
-            var bounds = new Bounds(center, Vector3.one * s);
+            var coord  = new Vector3Int(pChunk.x + x, y, pChunk.z + z);
+            var center = new Vector3(coord.x * cs + cs * 0.5f, coord.y * cs + cs * 0.5f, coord.z * cs + cs * 0.5f);
+            float distSq = (center - origin).sqrMagnitude;
+            bool inBypass = distSq <= bypassSq;
+            bool inFrustum = GeometryUtility.TestPlanesAABB(planes, new Bounds(center, Vector3.one * cs));
 
-            float  distSq      = (center - origin).sqrMagnitude;
-            bool   inBypass    = distSq <= bypassWorldSq;
-            bool   inFrustum   = GeometryUtility.TestPlanesAABB(planes, bounds);
-            bool   wouldLoad   = inBypass || inFrustum;
-
-            if (wouldLoad)
-            {
-                // Green = would be generated
-                Handles.color = inBypass
-                    ? new Color(0.2f, 1f, 0.2f, 0.6f)   // bright green = bypass radius
-                    : new Color(0.2f, 0.8f, 1f, 0.4f);   // cyan = frustum-visible
-            }
-            else
-            {
-                // Red = culled, would not be generated
-                Handles.color = new Color(1f, 0.2f, 0.2f, 0.15f);
-            }
-
-            Handles.DrawWireCube(center, Vector3.one * s);
+            Handles.color = !inBypass && !inFrustum
+                ? new Color(1f, 0.2f, 0.2f, 0.12f)
+                : inBypass
+                    ? new Color(0.2f, 1f, 0.2f, 0.6f)
+                    : new Color(0.2f, 0.8f, 1f, 0.4f);
+            Handles.DrawWireCube(center, Vector3.one * cs);
         }
 
-        // Legend in the top-left of the Scene view
+        // ── LOD 1+ zone: region outlines ──────────────────────────────────────
+        if (world.lodLevels > 0)
+        {
+            float rs = cs * RegionData.HSize; // 64 m per region side
+            var drawnRegions = new System.Collections.Generic.HashSet<Vector3Int>();
+
+            for (int x = -maxR; x <= maxR; x++)
+            for (int z = -maxR; z <= maxR; z++)
+            {
+                int dist = Mathf.Max(Mathf.Abs(x), Mathf.Abs(z));
+                if (dist < aligned) continue; // LOD 0 zone already drawn
+
+                int rx = Mathf.FloorToInt((pChunk.x + x) / (float)RegionData.HSize);
+                int rz = Mathf.FloorToInt((pChunk.z + z) / (float)RegionData.HSize);
+                var regionCoord = new Vector3Int(rx, 0, rz);
+                if (!drawnRegions.Add(regionCoord)) continue;
+
+                var center = new Vector3(rx * rs + rs * 0.5f, 0, rz * rs + rs * 0.5f);
+                bool inFrustum = GeometryUtility.TestPlanesAABB(planes,
+                    new Bounds(center, new Vector3(rs, rs, rs)));
+
+                // Colour by LOD level
+                int radius = aligned; float hue = 0.15f;
+                for (int lod = 1; lod <= world.lodLevels; lod++)
+                {
+                    if (dist <= radius * 2) { hue = 0.08f + lod * 0.1f; break; }
+                    radius *= 2;
+                }
+
+                var lodColor = Color.HSVToRGB(hue, 0.8f, 0.9f);
+                Handles.color = inFrustum
+                    ? new Color(lodColor.r, lodColor.g, lodColor.b, 0.35f)
+                    : new Color(0.5f, 0.5f, 0.5f, 0.08f);
+                Handles.DrawWireCube(center, new Vector3(rs, rs * 0.5f, rs));
+            }
+        }
+
+        // ── Legend ────────────────────────────────────────────────────────────
         Handles.BeginGUI();
-        var rect = new Rect(10, 10, 200, 76);
+        int legendH = 22 + 18 * (3 + world.lodLevels);
+        var rect = new Rect(10, 10, 220, legendH);
         GUI.Box(rect, GUIContent.none);
-        GUI.Label(new Rect(14, 12, 190, 18), "Frustum Culling Preview");
-        DrawLegendEntry(new Rect(14, 30, 190, 16), new Color(0.2f, 1f, 0.2f), "Bypass radius (always load)");
-        DrawLegendEntry(new Rect(14, 48, 190, 16), new Color(0.2f, 0.8f, 1f), "In frustum (would load)");
-        DrawLegendEntry(new Rect(14, 66, 190, 16), new Color(1f, 0.2f, 0.2f), "Culled (would skip)");
+        GUI.Label(new Rect(14, 12, 210, 18), "LOD + Frustum Preview");
+        DrawLegendEntry(new Rect(14, 30, 210, 16), new Color(0.2f, 1f, 0.2f),  "Bypass radius (LOD 0)");
+        DrawLegendEntry(new Rect(14, 48, 210, 16), new Color(0.2f, 0.8f, 1f),  "LOD 0 in frustum");
+        DrawLegendEntry(new Rect(14, 66, 210, 16), new Color(1f, 0.2f, 0.2f),  "LOD 0 culled");
+        for (int lod = 1; lod <= world.lodLevels; lod++)
+        {
+            var col = Color.HSVToRGB(0.08f + lod * 0.1f, 0.8f, 0.9f);
+            DrawLegendEntry(new Rect(14, 66 + lod * 18, 210, 16), col, $"Region LOD {lod} (step {4 << (lod-1)})");
+        }
         Handles.EndGUI();
     }
 
