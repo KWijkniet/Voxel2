@@ -61,8 +61,12 @@ public class VoxelWorld : MonoBehaviour
     public Material chunkMaterial;
 
     [Header("Async")]
-    public int maxConcurrentTasks = 4;
-    public int maxApplyPerFrame   = 2;
+    public int maxConcurrentTasks  = 4;
+    public int maxApplyPerFrame    = 6;
+    [Tooltip("Max new tasks submitted per UpdateLoadedChunks call. " +
+             "Half goes to LOD 0 mesh tasks (closest first), half to region data tasks. " +
+             "Lower = tighter prioritization; higher = loads more at once.")]
+    public int maxRequestsPerUpdate = 16;
 
     [Header("LOD")]
     [Tooltip("Number of LOD levels for region rendering. Each level doubles the view radius.")]
@@ -125,6 +129,8 @@ public class VoxelWorld : MonoBehaviour
     }
 
     private SemaphoreSlim _semaphore;
+    // Set when the frustum may have changed or new GOs were added — triggers a visibility pass
+    private bool _pendingFrustumUpdate;
 
     // ── Unity ─────────────────────────────────────────────────────────────────
 
@@ -135,6 +141,7 @@ public class VoxelWorld : MonoBehaviour
             chunkMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
         _lastCameraForward = Camera.main != null ? Camera.main.transform.forward : Vector3.forward;
         UpdateLoadedChunks(true);
+        _pendingFrustumUpdate = true;
     }
 
     private void Update()
@@ -145,10 +152,24 @@ public class VoxelWorld : MonoBehaviour
         bool lodChanged  = CheckLodSettingsChanged();
         bool posChanged  = CheckPositionChanged();
         bool rotChanged  = CheckRotationChanged();
-        if (posChanged || rotChanged || lodChanged) UpdateLoadedChunks(posChanged || lodChanged);
-        UpdateFrustumVisibility();
-        ApplyReadyChunks();
-        ApplyReadyRegions();
+
+        if (posChanged || rotChanged || lodChanged)
+        {
+            UpdateLoadedChunks(posChanged || lodChanged);
+            _pendingFrustumUpdate = true;
+        }
+
+        // ApplyReady* return true if any GOs were added — new GOs need a visibility pass
+        if (ApplyReadyChunks())  _pendingFrustumUpdate = true;
+        if (ApplyReadyRegions()) _pendingFrustumUpdate = true;
+
+        // Only test frustum when the frustum or scene content actually changed,
+        // not every frame — avoids 500+ TestPlanesAABB calls at 60 fps.
+        if (_pendingFrustumUpdate)
+        {
+            UpdateFrustumVisibility();
+            _pendingFrustumUpdate = false;
+        }
     }
 
     // ── Change detection ──────────────────────────────────────────────────────
@@ -269,13 +290,22 @@ public class VoxelWorld : MonoBehaviour
         if (cam != null) planes = GeometryUtility.CalculateFrustumPlanes(cam);
         float bypassSq = (frustumBypassRadius * PaletteChunk.Size) * (frustumBypassRadius * (float)PaletteChunk.Size);
 
+        // Limit submissions per call so the closest in-frustum chunks always get priority.
+        // toRequestC is already distance-sorted, so breaking early drops far chunks.
+        int lod0Budget = Mathf.Max(4, maxRequestsPerUpdate / 2);
+        int lod0Submitted = 0;
+
         foreach (var coord in toRequestC)
         {
+            if (lod0Submitted >= lod0Budget) break;
             var   center = ChunkCenterWorld(coord);
             float distSq = (center - playerPos).sqrMagnitude;
             if (distSq <= bypassSq || planes == null ||
                 GeometryUtility.TestPlanesAABB(planes, ChunkBounds(coord)))
+            {
                 RequestChunk(coord, buildMesh: true);
+                lod0Submitted++;
+            }
         }
 
         // ── Process desired regions (sorted by distance, frustum culled) ─────────
@@ -302,15 +332,19 @@ public class VoxelWorld : MonoBehaviour
             RegionCenterWorld(a).sqrMagnitude_To(playerPos)
             .CompareTo(RegionCenterWorld(b).sqrMagnitude_To(playerPos)));
 
+        // Region data requests use the other half of the budget.
+        // Without a cap, a single UpdateLoadedChunks call could submit 50 regions × 48 chunks
+        // = 2400 data tasks, starving LOD 0 mesh tasks of semaphore slots.
+        int regionDataBudget = Mathf.Max(4, maxRequestsPerUpdate / 2);
+        int regionDataSubmitted = 0;
+
         foreach (var regionCoord in regionsToProcess)
         {
             int wantedStep = GetRegionStep(regionCoord);
 
             // Re-mesh if LOD step changed
             if (_regionRenderers.ContainsKey(regionCoord))
-            {
                 UnloadRegion(regionCoord);
-            }
 
             if (!_regions.TryGetValue(regionCoord, out var region))
             {
@@ -318,7 +352,7 @@ public class VoxelWorld : MonoBehaviour
                 _regions[regionCoord] = region;
             }
 
-            // Feed already-available chunk data; request the rest
+            // Feed already-available chunk data; request the rest (within budget)
             var baseChunk = RegionBaseChunkCoord(regionCoord);
             for (int lcx = 0; lcx < RegionData.HSize; lcx++)
             for (int lcy = 0; lcy < verticalChunks; lcy++)
@@ -328,8 +362,11 @@ public class VoxelWorld : MonoBehaviour
                 var chunkCoord = new Vector3Int(baseChunk.x + lcx, lcy, baseChunk.z + lcz);
                 if (_chunks.TryGetValue(chunkCoord, out var existing))
                     region.SetChunk(lcx, lcy, lcz, existing);
-                else if (!_inFlight.Contains(chunkCoord))
+                else if (!_inFlight.Contains(chunkCoord) && regionDataSubmitted < regionDataBudget)
+                {
                     RequestChunk(chunkCoord, buildMesh: false);
+                    regionDataSubmitted++;
+                }
             }
 
             if (region.IsComplete)
@@ -359,9 +396,11 @@ public class VoxelWorld : MonoBehaviour
         });
     }
 
-    private void ApplyReadyChunks()
+    // Returns true if any new GameObjects were added to the scene this frame.
+    private bool ApplyReadyChunks()
     {
         int applied = 0;
+        bool anyAdded = false;
         while (applied < maxApplyPerFrame && _readyQueue.TryDequeue(out var result))
         {
             _inFlight.Remove(result.Coord);
@@ -377,6 +416,7 @@ public class VoxelWorld : MonoBehaviour
                     go.transform.localPosition = ChunkToWorldPos(result.Coord);
                     go.AddComponent<ChunkRenderer>().ApplyMeshData(result.MeshData, chunkMaterial);
                     _renderers[result.Coord] = go;
+                    anyAdded = true;
                 }
             }
 
@@ -387,6 +427,7 @@ public class VoxelWorld : MonoBehaviour
 
             applied++;
         }
+        return anyAdded;
     }
 
     private void TryFeedChunkIntoRegion(Vector3Int coord, PaletteChunk chunk)
@@ -430,9 +471,10 @@ public class VoxelWorld : MonoBehaviour
         });
     }
 
-    private void ApplyReadyRegions()
+    private bool ApplyReadyRegions()
     {
         int applied = 0;
+        bool anyAdded = false;
         while (applied < maxApplyPerFrame && _regionReadyQueue.TryDequeue(out var result))
         {
             _regionInFlight.Remove(result.RegionCoord);
@@ -446,10 +488,12 @@ public class VoxelWorld : MonoBehaviour
                 go.AddComponent<ChunkRenderer>().ApplyMeshData(result.MeshData, chunkMaterial);
                 _regionRenderers[result.RegionCoord] = go;
                 _regionStep[result.RegionCoord]      = result.Step;
+                anyAdded = true;
             }
 
             applied++;
         }
+        return anyAdded;
     }
 
     private void UnloadChunk(Vector3Int coord)
