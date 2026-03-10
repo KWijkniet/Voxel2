@@ -250,18 +250,39 @@ public class VoxelWorld : MonoBehaviour
                 RequestChunk(coord, buildMesh: true);
         }
 
-        // ── Process desired regions ───────────────────────────────────────────
+        // ── Process desired regions (sorted by distance, frustum culled) ─────────
+        var regionsToProcess = new List<Vector3Int>();
         foreach (var regionCoord in _desiredRegions)
+        {
+            // Skip if already rendered at correct step or being built
+            if (_regionInFlight.Contains(regionCoord)) continue;
+            if (_regionRenderers.ContainsKey(regionCoord))
+            {
+                int wantedStep = GetRegionStep(regionCoord);
+                if (_regionStep.TryGetValue(regionCoord, out int cur) && cur == wantedStep) continue;
+            }
+
+            // Frustum cull — regions are always beyond the bypass radius so no bypass check needed
+            if (planes != null && !GeometryUtility.TestPlanesAABB(planes, RegionBounds(regionCoord)))
+                continue;
+
+            regionsToProcess.Add(regionCoord);
+        }
+
+        // Nearest regions first — ensures the closest LOD ring fills in before distant ones
+        regionsToProcess.Sort((a, b) =>
+            RegionCenterWorld(a).sqrMagnitude_To(playerPos)
+            .CompareTo(RegionCenterWorld(b).sqrMagnitude_To(playerPos)));
+
+        foreach (var regionCoord in regionsToProcess)
         {
             int wantedStep = GetRegionStep(regionCoord);
 
             // Re-mesh if LOD step changed
             if (_regionRenderers.ContainsKey(regionCoord))
             {
-                if (_regionStep.TryGetValue(regionCoord, out int cur) && cur == wantedStep) continue;
                 UnloadRegion(regionCoord);
             }
-            if (_regionInFlight.Contains(regionCoord)) continue;
 
             if (!_regions.TryGetValue(regionCoord, out var region))
             {

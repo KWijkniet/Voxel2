@@ -245,19 +245,19 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 70aa573b684399741ab0811235d6e0ba, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VoxelWorld
-  viewDistance: 6
-  verticalChunks: 6
+  viewDistance: 16
+  verticalChunks: 3
   player: {fileID: 0}
   noiseScale: 0.04
-  terrainHeight: 64
+  terrainHeight: 16
   baseHeight: 1
   chunkMaterial: {fileID: 2100000, guid: 915577a1428a176489884433fbc104de, type: 2}
-  maxConcurrentTasks: 8
-  maxApplyPerFrame: 4
-  lodLevels: 2
+  maxConcurrentTasks: 10
+  maxApplyPerFrame: 8
+  lodLevels: 3
   frustumBypassRadius: 2
   cameraRotationThreshold: 0.98
-  disableOutsideFrustum: 1
+  disableOutsideFrustum: 0
 --- !u!4 &989120344
 Transform:
   m_ObjectHideFlags: 0

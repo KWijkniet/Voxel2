@@ -43,3 +43,11 @@ Region-based rendering ← hard, required for scale
 ↓
 Indirect rendering    ← very hard, required for 2km+
 The first two are small changes to existing code. LOD meshing is where the real work begins — want me to start with frustum culling + sorted queue as quick wins, or jump straight into the LOD system?
+
+6. World generation
+    1. FBM surface height          ← replaces current single Perlin (1 day)
+    2. Biome blending              ← mountain vs flat vs ocean (1 day)
+    3. Domain warping              ← organic shapes (2 hours, trivial add-on)
+    4. Sea level + block layering  ← water, sand, snow by altitude (2 hours)
+    5. 3D cave noise               ← requires density function refactor (1 day)
+    6. Rivers                      ← hardest, skip until later
