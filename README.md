@@ -23,6 +23,7 @@ Currently chunks are requested in arbitrary order. At large distances you need t
 Keep 16³ as the data unit (palette chunks stay small)
 Introduce a Region (e.g. 4×4×4 chunks = 64³ voxels) as the LOD rendering unit
 Higher LOD levels render one mesh per region instead of per chunk
+
 5. Indirect / Batched Rendering
 At viewDistance=128 chunks you'd have ~200,000 draw calls. You need:
 

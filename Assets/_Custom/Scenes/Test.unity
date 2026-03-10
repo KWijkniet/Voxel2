@@ -254,6 +254,7 @@ MonoBehaviour:
   chunkMaterial: {fileID: 2100000, guid: 915577a1428a176489884433fbc104de, type: 2}
   maxConcurrentTasks: 4
   maxApplyPerFrame: 2
+  lodLevels: 1
   frustumBypassRadius: 2
   cameraRotationThreshold: 0.98
   disableOutsideFrustum: 0
