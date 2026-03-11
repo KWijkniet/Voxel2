@@ -300,7 +300,7 @@ MonoBehaviour:
   lodLevels: 1
   frustumBypassRadius: 2
   cameraRotationThreshold: 0.98
-  disableOutsideFrustum: 0
+  disableOutsideFrustum: 1
 --- !u!4 &989120344
 Transform:
   m_ObjectHideFlags: 0

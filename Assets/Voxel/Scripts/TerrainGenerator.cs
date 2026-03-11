@@ -1,4 +1,9 @@
 using UnityEngine;
+using Unity.Burst;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Mathematics;
+using System.Collections.Concurrent;
 
 /// <summary>
 /// Terrain generation settings. Serializable struct so it can be safely
@@ -48,6 +53,18 @@ public struct TerrainSettings
 /// </summary>
 public static class TerrainGenerator
 {
+    // ── Surface height cache ──────────────────────────────────────────────────
+    // Avoids recomputing the expensive FBM+warp pipeline for the same (worldX, worldZ)
+    // when adjacent chunks load concurrently and share boundary column heights.
+    // Key = worldX << 32 | (uint)worldZ.  Only full-detail results are cached
+    // (low-detail may differ and are faster to recompute anyway).
+    // Call ClearSurfaceCache() when the player chunk changes so stale entries don't
+    // accumulate across large movements.
+
+    private static readonly ConcurrentDictionary<long, int> _surfaceCache = new();
+
+    public static void ClearSurfaceCache() => _surfaceCache.Clear();
+
     // ── Public API ────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -57,6 +74,9 @@ public static class TerrainGenerator
     /// </summary>
     public static int GetSurface(int worldX, int worldZ, in TerrainSettings s, bool lowDetail = false)
     {
+        long cacheKey = (long)worldX << 32 | (uint)worldZ;
+        if (!lowDetail && _surfaceCache.TryGetValue(cacheKey, out int cached)) return cached;
+
         float wx = worldX, wz = worldZ;
 
         // 1. Domain warp — one octave is enough for region-distance chunks
@@ -89,7 +109,9 @@ public static class TerrainGenerator
         else if (biome < 0.75f) height = Mathf.Lerp(hillsH,  mountH,  (biome - 0.50f) / 0.25f);
         else                    height = mountH;
 
-        return Mathf.RoundToInt(height);
+        int result = Mathf.RoundToInt(height);
+        if (!lowDetail) _surfaceCache.TryAdd(cacheKey, result);
+        return result;
     }
 
     /// <summary>
@@ -134,6 +156,143 @@ public static class TerrainGenerator
         {
             value     += Mathf.PerlinNoise(x * frequency + i * 7.31f,
                                            z * frequency + i * 5.17f) * amplitude;
+            norm      += amplitude;
+            amplitude *= persistence;
+            frequency *= lacunarity;
+        }
+        return value / norm;
+    }
+}
+
+/// <summary>
+/// Burst-compiled terrain generation job. One job per chunk.
+/// Results are written to Blocks (flat byte array, index = x + y*16 + z*256).
+///
+/// Schedule on the main thread via job.Schedule(); poll handle.IsCompleted each Update;
+/// call handle.Complete() then read Blocks to build the PaletteChunk.
+///
+/// Uses noise.cnoise (Unity.Mathematics Classic Perlin, range [-1,1] normalised to [0,1]).
+/// Terrain shape is visually equivalent to the managed path but not sample-identical.
+/// </summary>
+[BurstCompile]
+public struct GenerateChunkJob : IJob
+{
+    public TerrainSettings   Settings;
+    public int3              ChunkCoord;
+    public bool              LowDetail;
+    [WriteOnly] public NativeArray<byte> Blocks;
+
+    private const int Size       = 16;   // PaletteChunk.Size
+    private const int VoxelCount = 4096; // Size³
+
+    public void Execute()
+    {
+        TerrainSettings s = Settings;
+        int offsetX = ChunkCoord.x * Size;
+        int offsetY = ChunkCoord.y * Size;
+        int offsetZ = ChunkCoord.z * Size;
+        int chunkTop = offsetY + Size - 1;
+
+        // Fast-path: sample 4 corners to skip fully-solid and fully-air chunks
+        int minSurface = int.MaxValue, maxSurface = int.MinValue;
+        for (int cz = 0; cz <= Size; cz += Size)
+        for (int cx = 0; cx <= Size; cx += Size)
+        {
+            int h = GetSurface(offsetX + cx, offsetZ + cz, s, LowDetail);
+            if (h < minSurface) minSurface = h;
+            if (h > maxSurface) maxSurface = h;
+        }
+
+        if (chunkTop < minSurface - s.dirtDepth)
+        {
+            for (int i = 0; i < VoxelCount; i++) Blocks[i] = BlockType.Stone;
+            return;
+        }
+        if (offsetY > maxSurface && offsetY > s.seaLevel)
+        {
+            for (int i = 0; i < VoxelCount; i++) Blocks[i] = BlockType.Air;
+            return;
+        }
+
+        for (int z = 0; z < Size; z++)
+        for (int x = 0; x < Size; x++)
+        {
+            int surface = GetSurface(offsetX + x, offsetZ + z, s, LowDetail);
+            for (int y = 0; y < Size; y++)
+                Blocks[x + y * Size + z * Size * Size] =
+                    GetBlock(offsetX + x, offsetY + y, offsetZ + z, surface, s);
+        }
+    }
+
+    // ── Burst-compatible terrain helpers ─────────────────────────────────────
+    // These mirror TerrainGenerator's managed methods but use Unity.Mathematics
+    // instead of UnityEngine.Mathf so Burst can compile and vectorise them.
+
+    private static int GetSurface(int worldX, int worldZ, TerrainSettings s, bool lowDetail)
+    {
+        float wx = worldX, wz = worldZ;
+
+        if (s.warpStrength > 0f)
+        {
+            int warpOctaves = lowDetail ? 1 : 2;
+            float dX = FBM(wx * s.warpScale,         wz * s.warpScale,         warpOctaves, 0.5f, 2f);
+            float dZ = FBM(wx * s.warpScale + 3.71f, wz * s.warpScale + 1.57f, warpOctaves, 0.5f, 2f);
+            wx += (dX - 0.5f) * s.warpStrength * 2f;
+            wz += (dZ - 0.5f) * s.warpStrength * 2f;
+        }
+
+        int terrainOctaves = lowDetail ? math.max(2, s.octaves - 2) : s.octaves;
+        float fbm = FBM(wx * s.noiseScale, wz * s.noiseScale, terrainOctaves, s.persistence, s.lacunarity);
+
+        int biomeOctaves = lowDetail ? 2 : 3;
+        float biome = FBM(worldX * s.biomeScale + 100.3f, worldZ * s.biomeScale + 100.7f, biomeOctaves, 0.6f, 2f);
+
+        float oceanH  = s.seaLevel  - s.oceanDepth  + fbm * s.oceanDepth * 0.5f;
+        float plainsH = s.baseHeight + fbm * s.plainsHeight;
+        float hillsH  = s.baseHeight + fbm * (s.plainsHeight + s.mountainHeight) * 0.5f;
+        float mountH  = s.baseHeight + math.pow(fbm, 1.4f) * s.mountainHeight;
+
+        float height;
+        if      (biome < 0.25f) height = math.lerp(oceanH,  plainsH, biome / 0.25f);
+        else if (biome < 0.50f) height = math.lerp(plainsH, hillsH,  (biome - 0.25f) / 0.25f);
+        else if (biome < 0.75f) height = math.lerp(hillsH,  mountH,  (biome - 0.50f) / 0.25f);
+        else                    height = mountH;
+
+        return (int)math.round(height);
+    }
+
+    private static byte GetBlock(int worldX, int worldY, int worldZ, int surface, TerrainSettings s)
+    {
+        if (worldY > surface)
+            return worldY <= s.seaLevel ? BlockType.Water : BlockType.Air;
+
+        int  depth   = surface - worldY;
+        bool nearSea = surface <= s.seaLevel + s.sandBeachWidth;
+
+        if (depth == 0)
+        {
+            if (nearSea)                  return BlockType.Sand;
+            if (worldY >= s.snowAltitude) return BlockType.Snow;
+            return BlockType.Grass;
+        }
+
+        if (depth <= s.dirtDepth)
+            return nearSea ? BlockType.Sand : BlockType.Dirt;
+
+        return BlockType.Stone;
+    }
+
+    /// <summary>
+    /// FBM using noise.cnoise (Classic Perlin, range [-1,1] normalised to [0,1]).
+    /// Octave offsets match the managed path to produce comparable terrain shapes.
+    /// </summary>
+    private static float FBM(float x, float z, int octaves, float persistence, float lacunarity)
+    {
+        float value = 0f, amplitude = 1f, frequency = 1f, norm = 0f;
+        for (int i = 0; i < octaves; i++)
+        {
+            float2 pos = new float2(x * frequency + i * 7.31f, z * frequency + i * 5.17f);
+            value     += (noise.cnoise(pos) + 1f) * 0.5f * amplitude;
             norm      += amplitude;
             amplitude *= persistence;
             frequency *= lacunarity;

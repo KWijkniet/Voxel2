@@ -73,16 +73,13 @@ public class ChunkRenderer : MonoBehaviour
     public static MeshData BuildMeshData(PaletteChunk chunk, PaletteChunk[] neighbours,
                                           int lodLevel = 0)
     {
-        var verts = new List<Vector3>();
-        var norms = new List<Vector3>();
-        var uvs   = new List<Vector2>();
-        var tris  = new List<int>();
-        var mask  = new byte[PaletteChunk.Size * PaletteChunk.Size]; // 256 bytes, covers all LOD levels
-        int step  = 1 << lodLevel;
+        // Reuse per-thread buffers — no allocation on repeat calls from the same worker thread.
+        EnsureThreadLocalBuffers(PaletteChunk.Size * PaletteChunk.Size);
+        int step = 1 << lodLevel;
 
-        RunGreedyMesh(chunk, neighbours, verts, norms, uvs, tris, mask, step);
+        RunGreedyMesh(chunk, neighbours, _vertsTS, _normsTS, _uvsTS, _trisTS, _maskTS, step);
 
-        return new MeshData(verts.ToArray(), norms.ToArray(), uvs.ToArray(), tris.ToArray());
+        return new MeshData(_vertsTS.ToArray(), _normsTS.ToArray(), _uvsTS.ToArray(), _trisTS.ToArray());
     }
 
     /// <summary>Applies pre-built MeshData to this renderer. Must be called on the main thread.</summary>
@@ -127,6 +124,25 @@ public class ChunkRenderer : MonoBehaviour
     private static readonly List<Vector2> _uvs      = new List<Vector2>();
     private static readonly List<int>     _tris     = new List<int>();
     private static readonly byte[]        _maskSync = new byte[PaletteChunk.Size * PaletteChunk.Size];
+
+    // ── Async-path thread-local buffers (one set per worker thread) ───────────
+    // [ThreadStatic] avoids allocating new List<T> instances on every BuildMeshData /
+    // BuildRegionMeshData call while remaining thread-safe. Fields cannot have
+    // initializers with [ThreadStatic], so each accessor null-checks on first use.
+
+    [ThreadStatic] private static List<Vector3> _vertsTS;
+    [ThreadStatic] private static List<Vector3> _normsTS;
+    [ThreadStatic] private static List<Vector2> _uvsTS;
+    [ThreadStatic] private static List<int>     _trisTS;
+    [ThreadStatic] private static byte[]        _maskTS;
+
+    private static void EnsureThreadLocalBuffers(int minMaskSize)
+    {
+        if (_vertsTS == null) { _vertsTS = new(); _normsTS = new(); _uvsTS = new(); _trisTS = new(); }
+        _vertsTS.Clear(); _normsTS.Clear(); _uvsTS.Clear(); _trisTS.Clear();
+        if (_maskTS == null || _maskTS.Length < minMaskSize)
+            _maskTS = new byte[minMaskSize];
+    }
 
     // ── Core greedy mesher ────────────────────────────────────────────────────
 
@@ -267,10 +283,6 @@ public class ChunkRenderer : MonoBehaviour
     /// </summary>
     public static MeshData BuildRegionMeshData(RegionData region, RegionData[] neighbours, int step)
     {
-        var verts = new List<Vector3>();
-        var norms = new List<Vector3>();
-        var uvs   = new List<Vector2>();
-        var tris  = new List<int>();
         // Mask size = max(cellsU × cellsV) across all 6 face orientations.
         // X/Z faces use VoxelSizeY and VoxelSizeZ/X as their two tangent axes,
         // so if verticalChunks > 4 the Y dimension exceeds 64 and needs a larger buffer.
@@ -279,17 +291,19 @@ public class ChunkRenderer : MonoBehaviour
             (region.VoxelSizeX / step) * (region.VoxelSizeZ / step), // Y faces
             (region.VoxelSizeX / step) * (region.VoxelSizeY / step)  // Z faces
         );
-        var mask = new byte[maskSize];
 
-        GreedyMeshFaceRegion(region, neighbours[0], 0, 1, 2, Vector3.right,   false, verts, norms, uvs, tris, mask, step);
-        GreedyMeshFaceRegion(region, neighbours[1], 0, 1, 2, Vector3.left,    true,  verts, norms, uvs, tris, mask, step);
-        GreedyMeshFaceRegion(region, neighbours[2], 1, 2, 0, Vector3.up,      false, verts, norms, uvs, tris, mask, step);
-        GreedyMeshFaceRegion(region, neighbours[3], 1, 2, 0, Vector3.down,    true,  verts, norms, uvs, tris, mask, step);
-        GreedyMeshFaceRegion(region, neighbours[4], 2, 0, 1, Vector3.forward, false, verts, norms, uvs, tris, mask, step);
-        GreedyMeshFaceRegion(region, neighbours[5], 2, 0, 1, Vector3.back,    true,  verts, norms, uvs, tris, mask, step);
+        // Reuse per-thread buffers — no allocation on repeat calls from the same worker thread.
+        EnsureThreadLocalBuffers(maskSize);
+
+        GreedyMeshFaceRegion(region, neighbours[0], 0, 1, 2, Vector3.right,   false, _vertsTS, _normsTS, _uvsTS, _trisTS, _maskTS, step);
+        GreedyMeshFaceRegion(region, neighbours[1], 0, 1, 2, Vector3.left,    true,  _vertsTS, _normsTS, _uvsTS, _trisTS, _maskTS, step);
+        GreedyMeshFaceRegion(region, neighbours[2], 1, 2, 0, Vector3.up,      false, _vertsTS, _normsTS, _uvsTS, _trisTS, _maskTS, step);
+        GreedyMeshFaceRegion(region, neighbours[3], 1, 2, 0, Vector3.down,    true,  _vertsTS, _normsTS, _uvsTS, _trisTS, _maskTS, step);
+        GreedyMeshFaceRegion(region, neighbours[4], 2, 0, 1, Vector3.forward, false, _vertsTS, _normsTS, _uvsTS, _trisTS, _maskTS, step);
+        GreedyMeshFaceRegion(region, neighbours[5], 2, 0, 1, Vector3.back,    true,  _vertsTS, _normsTS, _uvsTS, _trisTS, _maskTS, step);
 
         // Return raw arrays only — Mesh creation must happen on the main thread
-        return new MeshData(verts.ToArray(), norms.ToArray(), uvs.ToArray(), tris.ToArray());
+        return new MeshData(_vertsTS.ToArray(), _normsTS.ToArray(), _uvsTS.ToArray(), _trisTS.ToArray());
     }
 
     /// <summary>

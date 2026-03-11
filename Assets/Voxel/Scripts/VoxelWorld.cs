@@ -4,6 +4,9 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Mathematics;
 
 /// <summary>
 /// Two-tier LOD rendering:
@@ -112,6 +115,18 @@ public class VoxelWorld : MonoBehaviour
         { Coord = c; Chunk = ch; MeshData = m; }
     }
 
+    // Tracks scheduled Burst generation jobs until their JobHandle is complete.
+    private struct PendingGenerationJob
+    {
+        public Vector3Int        Coord;
+        public JobHandle         Handle;
+        public NativeArray<byte> Blocks;
+        public bool              BuildMesh;
+        public PaletteChunk[]    Neighbours; // pre-fetched for mesh build; null if !BuildMesh
+        public bool              Discarded;  // true when position changed before job completed
+    }
+    private readonly List<PendingGenerationJob> _pendingGenerationJobs = new();
+
     // ── LOD 1+ storage (regions) ──────────────────────────────────────────────
 
     private readonly Dictionary<Vector3Int, RegionData>  _regions          = new();
@@ -154,6 +169,19 @@ public class VoxelWorld : MonoBehaviour
         _pendingFrustumUpdate = true;
     }
 
+    private void OnDestroy()
+    {
+        _generationCts.Cancel();
+        _generationCts.Dispose();
+        // Complete and dispose all in-flight Burst jobs to avoid NativeArray leaks.
+        foreach (var pj in _pendingGenerationJobs)
+        {
+            pj.Handle.Complete();
+            pj.Blocks.Dispose();
+        }
+        _pendingGenerationJobs.Clear();
+    }
+
     private void Update()
     {
         // LOD must be checked first: it resets _lastPlayerChunk to a sentinel,
@@ -180,10 +208,26 @@ public class VoxelWorld : MonoBehaviour
                 _generationCts.Cancel();
                 _generationCts.Dispose();
                 _generationCts = new CancellationTokenSource();
+
+                // Mark all pending Burst generation jobs as discarded.
+                // We cannot cancel them mid-execution; they will complete naturally
+                // and be disposed in ProcessCompletedGenerationJobs without enqueuing results.
+                for (int i = 0; i < _pendingGenerationJobs.Count; i++)
+                {
+                    var pj = _pendingGenerationJobs[i];
+                    pj.Discarded = true;
+                    _pendingGenerationJobs[i] = pj;
+                }
+
+                if (posChanged) TerrainGenerator.ClearSurfaceCache();
             }
             UpdateLoadedChunks(posChanged || lodChanged);
             _pendingFrustumUpdate = true;
         }
+
+        // Collect any Burst generation jobs that completed this frame and kick off
+        // their mesh builds (or enqueue data-only results) before ApplyReadyChunks.
+        ProcessCompletedGenerationJobs();
 
         bool chunksApplied  = ApplyReadyChunks();
         bool regionsApplied = ApplyReadyRegions();
@@ -250,33 +294,53 @@ public class VoxelWorld : MonoBehaviour
             _desiredCoords.Clear();
             _desiredRegions.Clear();
             int maxR = MaxRadius;
+            int vd   = AlignedViewDistance;
 
-            for (int x = -maxR; x <= maxR; x++)
-            for (int z = -maxR; z <= maxR; z++)
+            // ── Pass 1: LOD 0 zone — iterate chunk offsets in [-vd+1, vd-1] ──────
+            // Matches the original condition: Mathf.Max(|x|, |z|) < AlignedViewDistance.
+            // No region logic needed here; the entire square is LOD 0 individual chunks.
+            for (int x = -(vd - 1); x <= vd - 1; x++)
+            for (int z = -(vd - 1); z <= vd - 1; z++)
             {
-                int dist = Mathf.Max(Mathf.Abs(x), Mathf.Abs(z));
-                var absChunk = new Vector3Int(_lastPlayerChunk.x + x, 0, _lastPlayerChunk.z + z);
+                int ax = _lastPlayerChunk.x + x;
+                int az = _lastPlayerChunk.z + z;
+                for (int y = 0; y < verticalChunks; y++)
+                    _desiredCoords.Add(new Vector3Int(ax, y, az));
+            }
 
-                if (dist < AlignedViewDistance)
+            // ── Pass 2: LOD 1+ zone — iterate region coords directly ──────────────
+            // Iterates (2*maxRegionR+1)² regions instead of (2*maxR+1)² chunk offsets,
+            // giving ~7–11× fewer iterations. RegionContainsLod0Chunk is now called once
+            // per region (boundary detection) rather than once per chunk offset.
+            int h            = RegionData.HSize;
+            int playerRegionX = Mathf.FloorToInt(_lastPlayerChunk.x / (float)h);
+            int playerRegionZ = Mathf.FloorToInt(_lastPlayerChunk.z / (float)h);
+            int maxRegionR    = maxR / h + 1; // +1 to cover partial regions at the boundary
+
+            for (int rx = -maxRegionR; rx <= maxRegionR; rx++)
+            for (int rz = -maxRegionR; rz <= maxRegionR; rz++)
+            {
+                var regionCoord = new Vector3Int(playerRegionX + rx, 0, playerRegionZ + rz);
+                var baseChunk   = RegionBaseChunkCoord(regionCoord);
+
+                // Exclude regions whose nearest chunk exceeds MaxRadius.
+                int nearestX = Mathf.Clamp(_lastPlayerChunk.x, baseChunk.x, baseChunk.x + h - 1);
+                int nearestZ = Mathf.Clamp(_lastPlayerChunk.z, baseChunk.z, baseChunk.z + h - 1);
+                if (Mathf.Max(Mathf.Abs(nearestX - _lastPlayerChunk.x),
+                              Mathf.Abs(nearestZ - _lastPlayerChunk.z)) > maxR) continue;
+
+                if (RegionContainsLod0Chunk(regionCoord))
                 {
-                    for (int y = 0; y < verticalChunks; y++)
-                        _desiredCoords.Add(new Vector3Int(absChunk.x, y, absChunk.z));
+                    // Boundary region: render its chunks as individual LOD 0 GOs to
+                    // prevent overlap with the adjacent region mesh.
+                    for (int lcx = 0; lcx < h; lcx++)
+                    for (int lcy = 0; lcy < verticalChunks; lcy++)
+                    for (int lcz = 0; lcz < h; lcz++)
+                        _desiredCoords.Add(new Vector3Int(baseChunk.x + lcx, lcy, baseChunk.z + lcz));
                 }
                 else
                 {
-                    // A region straddles the LOD boundary if any of its chunks are
-                    // within AlignedViewDistance of the player. Render the whole region
-                    // as individual LOD 0 chunks to prevent overlap with the region mesh.
-                    var regionCoord = ChunkToRegionCoord(absChunk);
-                    if (RegionContainsLod0Chunk(regionCoord))
-                    {
-                        for (int y = 0; y < verticalChunks; y++)
-                            _desiredCoords.Add(new Vector3Int(absChunk.x, y, absChunk.z));
-                    }
-                    else
-                    {
-                        _desiredRegions.Add(regionCoord);
-                    }
+                    _desiredRegions.Add(regionCoord);
                 }
             }
 
@@ -416,36 +480,58 @@ public class VoxelWorld : MonoBehaviour
     private void RequestChunk(Vector3Int coord, bool buildMesh)
     {
         _inFlight.Add(coord);
-        var existing   = GetChunk(coord);
-        var neighbours = buildMesh ? ChunkRenderer.FetchNeighbours(coord, GetChunk) : null;
-        var settings   = GetTerrainSettings();
-        bool dataOnly  = !buildMesh;
-        var  token     = _generationCts.Token; // snapshot — immune to later CTS replacement
+        var existing = GetChunk(coord);
 
-        Task.Run(async () =>
+        if (existing != null)
         {
-            // WaitAsync respects cancellation: if the player moves before this task
-            // acquires the semaphore, it throws OperationCanceledException immediately,
-            // freeing the slot for higher-priority new-position tasks.
-            try
+            // Data already present — skip generation, build mesh directly if needed.
+            if (!buildMesh)
             {
-                await _semaphore.WaitAsync(token);
-            }
-            catch (OperationCanceledException)
-            {
-                // Notify the main thread to remove this coord from _inFlight
-                // so it can be re-requested at the new position if still desired.
-                _cancelledCoords.Enqueue(coord);
+                // Re-enqueue so ApplyReadyChunks can call TryFeedChunkIntoRegion.
+                _inFlight.Remove(coord);
+                _readyQueue.Enqueue(new ChunkBuildResult(coord, existing, null));
                 return;
             }
 
-            try
+            var neighbours = ChunkRenderer.FetchNeighbours(coord, GetChunk);
+            var token = _generationCts.Token;
+            Task.Run(async () =>
             {
-                var chunk = existing ?? GenerateChunkData(coord, settings, dataOnly);
-                var mesh  = buildMesh ? ChunkRenderer.BuildMeshData(chunk, neighbours, 0) : null;
-                _readyQueue.Enqueue(new ChunkBuildResult(coord, chunk, mesh));
-            }
-            finally { _semaphore.Release(); }
+                try { await _semaphore.WaitAsync(token); }
+                catch (OperationCanceledException) { _cancelledCoords.Enqueue(coord); return; }
+                try
+                {
+                    var mesh = ChunkRenderer.BuildMeshData(existing, neighbours, 0);
+                    _readyQueue.Enqueue(new ChunkBuildResult(coord, existing, mesh));
+                }
+                finally { _semaphore.Release(); }
+            });
+            return;
+        }
+
+        // Schedule a Burst-compiled terrain generation job.
+        // Jobs are scheduled on the main thread and run on Unity's job worker threads.
+        // ProcessCompletedGenerationJobs() polls IsCompleted each Update.
+        int size   = PaletteChunk.Size;
+        var blocks = new NativeArray<byte>(size * size * size, Allocator.TempJob);
+        var job    = new GenerateChunkJob
+        {
+            Settings   = GetTerrainSettings(),
+            ChunkCoord = new int3(coord.x, coord.y, coord.z),
+            LowDetail  = !buildMesh,
+            Blocks     = blocks,
+        };
+        var handle     = job.Schedule();
+        var neighbours2 = buildMesh ? ChunkRenderer.FetchNeighbours(coord, GetChunk) : null;
+
+        _pendingGenerationJobs.Add(new PendingGenerationJob
+        {
+            Coord      = coord,
+            Handle     = handle,
+            Blocks     = blocks,
+            BuildMesh  = buildMesh,
+            Neighbours = neighbours2,
+            Discarded  = false,
         });
     }
 
@@ -481,6 +567,75 @@ public class VoxelWorld : MonoBehaviour
             applied++;
         }
         return anyAdded;
+    }
+
+    // ── Burst job completion ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Called every Update. Drains any Burst generation jobs whose JobHandle
+    /// is now complete, builds the PaletteChunk from the NativeArray result,
+    /// and either enqueues a data-only result or kicks off an async mesh build.
+    /// Discarded jobs (player moved) are disposed without enqueueing.
+    /// </summary>
+    private void ProcessCompletedGenerationJobs()
+    {
+        for (int i = _pendingGenerationJobs.Count - 1; i >= 0; i--)
+        {
+            var pj = _pendingGenerationJobs[i];
+            if (!pj.Handle.IsCompleted) continue;
+
+            pj.Handle.Complete(); // Required even when IsCompleted — finalises the job
+            _pendingGenerationJobs.RemoveAt(i);
+
+            if (pj.Discarded)
+            {
+                pj.Blocks.Dispose();
+                _cancelledCoords.Enqueue(pj.Coord); // cleans up _inFlight in Update's drain loop
+                continue;
+            }
+
+            _inFlight.Remove(pj.Coord);
+            var chunk = BuildPaletteChunkFromBlocks(pj.Blocks);
+            pj.Blocks.Dispose();
+
+            if (!pj.BuildMesh)
+            {
+                _readyQueue.Enqueue(new ChunkBuildResult(pj.Coord, chunk, null));
+                continue;
+            }
+
+            // Kick off mesh build on a background thread (semaphore-limited, cancellable).
+            var coord      = pj.Coord;
+            var chunkCopy  = chunk;
+            var neighbours = pj.Neighbours;
+            var token      = _generationCts.Token;
+            Task.Run(async () =>
+            {
+                try { await _semaphore.WaitAsync(token); }
+                catch (OperationCanceledException) { _cancelledCoords.Enqueue(coord); return; }
+                try
+                {
+                    var mesh = ChunkRenderer.BuildMeshData(chunkCopy, neighbours, 0);
+                    _readyQueue.Enqueue(new ChunkBuildResult(coord, chunkCopy, mesh));
+                }
+                finally { _semaphore.Release(); }
+            });
+        }
+    }
+
+    private static PaletteChunk BuildPaletteChunkFromBlocks(NativeArray<byte> blocks)
+    {
+        var chunk = new PaletteChunk();
+        int size  = PaletteChunk.Size;
+        for (int z = 0; z < size; z++)
+        for (int x = 0; x < size; x++)
+        for (int y = 0; y < size; y++)
+        {
+            byte b = blocks[x + y * size + z * size * size];
+            if (b != BlockType.Air)
+                chunk.SetBlock(x, y, z, b);
+        }
+        return chunk;
     }
 
     private void TryFeedChunkIntoRegion(Vector3Int coord, PaletteChunk chunk)
