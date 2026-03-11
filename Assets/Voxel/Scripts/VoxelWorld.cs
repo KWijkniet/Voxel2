@@ -154,8 +154,17 @@ public class VoxelWorld : MonoBehaviour
     // Tasks already executing are unaffected and complete normally.
     private CancellationTokenSource _generationCts = new CancellationTokenSource();
 
-    // Background tasks signal here when cancelled so the main thread can clean _inFlight.
-    private readonly ConcurrentQueue<Vector3Int> _cancelledCoords = new();
+    // Background tasks signal here when cancelled so the main thread can clean _inFlight / _regionInFlight.
+    private readonly ConcurrentQueue<Vector3Int> _cancelledCoords       = new();
+    private readonly ConcurrentQueue<Vector3Int> _cancelledRegionCoords = new();
+
+    // Persistent scratch lists reused in UpdateLoadedChunks to avoid per-call allocations.
+    private readonly List<Vector3Int> _scratchUnloadC       = new();
+    private readonly List<Vector3Int> _scratchUnloadR       = new();
+    private readonly List<Vector3Int> _scratchEvictC        = new();
+    private readonly List<Vector3Int> _scratchEvictR        = new();
+    private readonly List<Vector3Int> _scratchRequestC      = new();
+    private readonly List<Vector3Int> _scratchRegionsToProc = new();
 
     // ── Unity ─────────────────────────────────────────────────────────────────
 
@@ -196,6 +205,11 @@ public class VoxelWorld : MonoBehaviour
         while (_cancelledCoords.TryDequeue(out var cancelled))
         {
             _inFlight.Remove(cancelled);
+            anyDrained = true;
+        }
+        while (_cancelledRegionCoords.TryDequeue(out var cancelledR))
+        {
+            _regionInFlight.Remove(cancelledR);
             anyDrained = true;
         }
 
@@ -345,42 +359,47 @@ public class VoxelWorld : MonoBehaviour
             }
 
             // Unload out-of-range individual GOs
-            var toUnloadC = new List<Vector3Int>();
+            _scratchUnloadC.Clear();
             foreach (var c in _renderers.Keys)
-                if (!_desiredCoords.Contains(c)) toUnloadC.Add(c);
-            foreach (var c in toUnloadC) UnloadChunk(c);
+                if (!_desiredCoords.Contains(c)) _scratchUnloadC.Add(c);
+            foreach (var c in _scratchUnloadC) UnloadChunk(c);
 
             // Unload out-of-range region GOs
-            var toUnloadR = new List<Vector3Int>();
+            _scratchUnloadR.Clear();
             foreach (var r in _regionRenderers.Keys)
-                if (!_desiredRegions.Contains(r)) toUnloadR.Add(r);
-            foreach (var r in toUnloadR) UnloadRegion(r);
+                if (!_desiredRegions.Contains(r)) _scratchUnloadR.Add(r);
+            foreach (var r in _scratchUnloadR) UnloadRegion(r);
 
             // Evict chunk data
             int evictR = MaxRadius + 2;
-            var toEvictC = new List<Vector3Int>();
+            _scratchEvictC.Clear();
             foreach (var c in _chunks.Keys)
                 if (Mathf.Abs(c.x - _lastPlayerChunk.x) > evictR ||
-                    Mathf.Abs(c.z - _lastPlayerChunk.z) > evictR) toEvictC.Add(c);
-            foreach (var c in toEvictC) _chunks.Remove(c);
+                    Mathf.Abs(c.z - _lastPlayerChunk.z) > evictR) _scratchEvictC.Add(c);
+            foreach (var c in _scratchEvictC) _chunks.Remove(c);
 
             // Evict region data
-            var toEvictR = new List<Vector3Int>();
+            _scratchEvictR.Clear();
             foreach (var r in _regions.Keys)
-                if (!_desiredRegions.Contains(r)) toEvictR.Add(r);
-            foreach (var r in toEvictR) _regions.Remove(r);
+                if (!_desiredRegions.Contains(r)) _scratchEvictR.Add(r);
+            foreach (var r in _scratchEvictR) _regions.Remove(r);
         }
 
         // ── Request LOD 0 chunks ──────────────────────────────────────────────
-        var toRequestC = new List<Vector3Int>();
+        _scratchRequestC.Clear();
         foreach (var coord in _desiredCoords)
             if (!_renderers.ContainsKey(coord) && !_inFlight.Contains(coord))
-                toRequestC.Add(coord);
+                _scratchRequestC.Add(coord);
+        var toRequestC = _scratchRequestC;
 
         var playerPos = player != null ? player.position : Vector3.zero;
-        toRequestC.Sort((a, b) =>
-            ChunkCenterWorld(a).sqrMagnitude_To(playerPos)
-            .CompareTo(ChunkCenterWorld(b).sqrMagnitude_To(playerPos)));
+
+        // Pre-compute squared distances once; Sort's comparator would otherwise call
+        // ChunkCenterWorld on both sides of every comparison — O(n log n) redundant calls.
+        var chunkDistSq = new Dictionary<Vector3Int, float>(toRequestC.Count);
+        foreach (var c in toRequestC)
+            chunkDistSq[c] = ChunkCenterWorld(c).sqrMagnitude_To(playerPos);
+        toRequestC.Sort((a, b) => chunkDistSq[a].CompareTo(chunkDistSq[b]));
 
         Plane[] planes = null;
         var cam = Camera.main;
@@ -406,7 +425,8 @@ public class VoxelWorld : MonoBehaviour
         }
 
         // ── Process desired regions (sorted by distance, frustum culled) ─────────
-        var regionsToProcess = new List<Vector3Int>();
+        _scratchRegionsToProc.Clear();
+        var regionsToProcess = _scratchRegionsToProc;
         foreach (var regionCoord in _desiredRegions)
         {
             // Skip if already rendered at correct step or being built
@@ -424,10 +444,11 @@ public class VoxelWorld : MonoBehaviour
             regionsToProcess.Add(regionCoord);
         }
 
-        // Nearest regions first — ensures the closest LOD ring fills in before distant ones
-        regionsToProcess.Sort((a, b) =>
-            RegionCenterWorld(a).sqrMagnitude_To(playerPos)
-            .CompareTo(RegionCenterWorld(b).sqrMagnitude_To(playerPos)));
+        // Nearest regions first — pre-compute distances to avoid redundant calls in Sort.
+        var regionDistSq = new Dictionary<Vector3Int, float>(regionsToProcess.Count);
+        foreach (var r in regionsToProcess)
+            regionDistSq[r] = RegionCenterWorld(r).sqrMagnitude_To(playerPos);
+        regionsToProcess.Sort((a, b) => regionDistSq[a].CompareTo(regionDistSq[b]));
 
         // Region data requests use the other half of the budget.
         // Without a cap, a single UpdateLoadedChunks call could submit 50 regions × 48 chunks
@@ -626,6 +647,9 @@ public class VoxelWorld : MonoBehaviour
     private static PaletteChunk BuildPaletteChunkFromBlocks(NativeArray<byte> blocks)
     {
         var chunk = new PaletteChunk();
+        // Pre-seed all terrain types so GrowIfNeeded never repacks 4096 voxels mid-fill.
+        chunk.SeedPalette(BlockType.Stone, BlockType.Dirt, BlockType.Grass,
+                          BlockType.Sand,  BlockType.Water, BlockType.Snow);
         int size  = PaletteChunk.Size;
         for (int z = 0; z < size; z++)
         for (int x = 0; x < size; x++)
@@ -667,9 +691,17 @@ public class VoxelWorld : MonoBehaviour
         neighbours[4] = GetRegion(regionCoord + dirs[4]);
         neighbours[5] = GetRegion(regionCoord + dirs[5]);
 
+        var token = _generationCts.Token; // snapshot — immune to later CTS replacement
         Task.Run(async () =>
         {
-            await _semaphore.WaitAsync();
+            try { await _semaphore.WaitAsync(token); }
+            catch (OperationCanceledException)
+            {
+                // Notify main thread to remove this region from _regionInFlight so it
+                // can be re-requested at the new position if still desired.
+                _cancelledRegionCoords.Enqueue(regionCoord);
+                return;
+            }
             try
             {
                 var mesh = ChunkRenderer.BuildRegionMeshData(region, neighbours, step);
@@ -765,6 +797,8 @@ public class VoxelWorld : MonoBehaviour
                                                    bool lowDetail = false)
     {
         var chunk   = new PaletteChunk();
+        chunk.SeedPalette(BlockType.Stone, BlockType.Dirt, BlockType.Grass,
+                          BlockType.Sand,  BlockType.Water, BlockType.Snow);
         int offsetX = coord.x * PaletteChunk.Size;
         int offsetY = coord.y * PaletteChunk.Size;
         int offsetZ = coord.z * PaletteChunk.Size;

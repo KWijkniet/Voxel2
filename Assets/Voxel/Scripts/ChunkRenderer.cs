@@ -91,7 +91,7 @@ public class ChunkRenderer : MonoBehaviour
         _meshRenderer.sharedMaterial = material;
         if (data.IsEmpty) { _meshFilter.sharedMesh = null; return; }
         // Auto-select index format: regions can exceed the 65 535 UInt16 limit
-        var fmt = data.Vertices.Length > 65535 ? IndexFormat.UInt32 : IndexFormat.UInt16;
+        var fmt = data.Vertices.Length > ushort.MaxValue ? IndexFormat.UInt32 : IndexFormat.UInt16;
         _meshFilter.sharedMesh = UploadMesh(data.Vertices, data.Normals, data.UVs, data.Triangles, fmt);
     }
 
@@ -172,7 +172,7 @@ public class ChunkRenderer : MonoBehaviour
     {
         int size  = PaletteChunk.Size;
         int cells = size / step; // cells per axis at this LOD (16, 8, 4, 2)
-        var pos   = new int[3];
+        Span<int> pos = stackalloc int[3]; // stack-allocated: avoids 6 heap allocs per chunk build
 
         for (int slice = 0; slice < cells; slice++)
         {
@@ -316,11 +316,11 @@ public class ChunkRenderer : MonoBehaviour
         List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<int> tris,
         byte[] mask, int step)
     {
-        int[] sizes   = { region.VoxelSizeX, region.VoxelSizeY, region.VoxelSizeZ };
+        Span<int> sizes = stackalloc int[3] { region.VoxelSizeX, region.VoxelSizeY, region.VoxelSizeZ };
         int cellsSlice = sizes[sliceAxis] / step;
         int cellsU     = sizes[uAxis]     / step;
         int cellsV     = sizes[vAxis]     / step;
-        var pos        = new int[3];
+        Span<int> pos  = stackalloc int[3]; // stack-allocated: no heap alloc per face
 
         for (int slice = 0; slice < cellsSlice; slice++)
         {
@@ -332,7 +332,9 @@ public class ChunkRenderer : MonoBehaviour
                 pos[uAxis]     = u     * step;
                 pos[vAxis]     = v     * step;
 
-                byte here = region.GetBlock(pos[0], pos[1], pos[2]);
+                // Coords (slice*step, u*step, v*step) are always within the region's bounds,
+                // so skip the 6-comparison bounds check in the hot inner loop.
+                byte here = region.GetBlockUnchecked(pos[0], pos[1], pos[2]);
                 if (here == BlockType.Air) { mask[u + v * cellsU] = 0; continue; }
 
                 int  neighborCell  = slice + (backFace ? -1 : 1);
@@ -341,13 +343,14 @@ public class ChunkRenderer : MonoBehaviour
                 if (neighborCell >= 0 && neighborCell < cellsSlice)
                 {
                     pos[sliceAxis] = neighborCell * step;
-                    neighborSolid  = region.IsSolid(pos[0], pos[1], pos[2]);
+                    neighborSolid  = region.IsSolidUnchecked(pos[0], pos[1], pos[2]);
                 }
                 else
                 {
-                    // Cross-region boundary — sample the first/last cell of the neighbour
+                    // Cross-region boundary — sample the first/last cell of the neighbour.
+                    // Resulting coords are always within the neighbour's bounds (same region size).
                     pos[sliceAxis] = neighborCell < 0 ? sizes[sliceAxis] - step : 0;
-                    neighborSolid  = neighbour != null && neighbour.IsSolid(pos[0], pos[1], pos[2]);
+                    neighborSolid  = neighbour != null && neighbour.IsSolidUnchecked(pos[0], pos[1], pos[2]);
                     // Same water boundary fix as the chunk mesher above
                     if (here == BlockType.Water && neighbour == null)
                         neighborSolid = true;

@@ -54,5 +54,18 @@ public class RegionData
 
     public bool IsSolid(int x, int y, int z) => GetBlock(x, y, z) != BlockType.Air;
 
+    /// <summary>
+    /// Bounds-check-free GetBlock for the greedy mesher inner loop.
+    /// Caller must guarantee (x, y, z) is within [0, VoxelSizeX/Y/Z).
+    /// </summary>
+    public byte GetBlockUnchecked(int x, int y, int z)
+    {
+        int cs    = PaletteChunk.Size;
+        var chunk = _chunks[Index(x / cs, y / cs, z / cs)];
+        return chunk != null ? chunk.GetBlock(x % cs, y % cs, z % cs) : BlockType.Air;
+    }
+
+    public bool IsSolidUnchecked(int x, int y, int z) => GetBlockUnchecked(x, y, z) != BlockType.Air;
+
     private int Index(int cx, int cy, int cz) => cx + cy * HSize + cz * HSize * VerticalChunks;
 }

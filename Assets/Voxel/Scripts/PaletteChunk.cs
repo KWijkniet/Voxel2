@@ -91,6 +91,33 @@ public class PaletteChunk
         return GetBlock(x, y, z) != BlockType.Air;
     }
 
+    /// <summary>
+    /// Pre-populates the palette with all provided block types and widens _data to the
+    /// required final bit-width in one step. Call this BEFORE any SetBlock to avoid
+    /// incremental GrowIfNeeded repacks as the palette crosses each bit-width boundary.
+    ///
+    /// Safe only when all voxels are still Air (index 0): index 0 is all-zero bits at
+    /// every supported bit-width, so reallocating _data without a voxel repack is correct.
+    /// </summary>
+    public void SeedPalette(params byte[] blockTypes)
+    {
+        foreach (var bt in blockTypes)
+        {
+            if (_blockToIndex[bt] != 255) continue; // already registered
+            _blockToIndex[bt] = (byte)_palette.Count;
+            _palette.Add(bt);
+        }
+
+        // Grow _data once to the final required width.
+        // No voxel repack is needed — all voxels are Air (index 0 = all-zero bits).
+        int needed = BitsRequired(_palette.Count);
+        if (needed > _bitsPerIndex)
+        {
+            _bitsPerIndex = needed;
+            _data = AllocData(_bitsPerIndex);
+        }
+    }
+
     // ── Bit packing ───────────────────────────────────────────────────────────
 
     private int ReadBits(int voxelIndex)
