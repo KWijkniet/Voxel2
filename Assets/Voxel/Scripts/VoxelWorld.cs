@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
@@ -129,8 +130,17 @@ public class VoxelWorld : MonoBehaviour
     }
 
     private SemaphoreSlim _semaphore;
-    // Set when the frustum may have changed or new GOs were added — triggers a visibility pass
+    // Triggers a visibility pass when the frustum or scene content changes
     private bool _pendingFrustumUpdate;
+    // True when the last UpdateLoadedChunks hit the request budget — more batches are needed
+    private bool _needsMoreRequests;
+
+    // Cancels all tasks that are waiting for the semaphore when the player moves.
+    // Tasks already executing are unaffected and complete normally.
+    private CancellationTokenSource _generationCts = new CancellationTokenSource();
+
+    // Background tasks signal here when cancelled so the main thread can clean _inFlight.
+    private readonly ConcurrentQueue<Vector3Int> _cancelledCoords = new();
 
     // ── Unity ─────────────────────────────────────────────────────────────────
 
@@ -153,15 +163,38 @@ public class VoxelWorld : MonoBehaviour
         bool posChanged  = CheckPositionChanged();
         bool rotChanged  = CheckRotationChanged();
 
+        // Remove cancelled task markers so those coords can be re-requested
+        bool anyDrained = false;
+        while (_cancelledCoords.TryDequeue(out var cancelled))
+        {
+            _inFlight.Remove(cancelled);
+            anyDrained = true;
+        }
+
         if (posChanged || rotChanged || lodChanged)
         {
+            // Cancel all tasks waiting for the semaphore — they're for the old position
+            // and would block new high-priority tasks for the current position.
+            if (posChanged || lodChanged)
+            {
+                _generationCts.Cancel();
+                _generationCts.Dispose();
+                _generationCts = new CancellationTokenSource();
+            }
             UpdateLoadedChunks(posChanged || lodChanged);
             _pendingFrustumUpdate = true;
         }
 
-        // ApplyReady* return true if any GOs were added — new GOs need a visibility pass
-        if (ApplyReadyChunks())  _pendingFrustumUpdate = true;
-        if (ApplyReadyRegions()) _pendingFrustumUpdate = true;
+        bool chunksApplied  = ApplyReadyChunks();
+        bool regionsApplied = ApplyReadyRegions();
+
+        if (chunksApplied || regionsApplied || anyDrained)
+        {
+            _pendingFrustumUpdate = true;
+            // Tasks completed (or cancelled coords freed) — submit the next batch
+            if (_needsMoreRequests)
+                UpdateLoadedChunks(false);
+        }
 
         // Only test frustum when the frustum or scene content actually changed,
         // not every frame — avoids 500+ TestPlanesAABB calls at 60 fps.
@@ -372,6 +405,10 @@ public class VoxelWorld : MonoBehaviour
             if (region.IsComplete)
                 RequestRegionMesh(regionCoord, region, wantedStep);
         }
+
+        // If either budget was fully spent, there are likely more items waiting.
+        // Update() will call UpdateLoadedChunks(false) again once tasks complete.
+        _needsMoreRequests = (lod0Submitted >= lod0Budget) || (regionDataSubmitted >= regionDataBudget);
     }
 
     // ── LOD 0 chunk tasks ─────────────────────────────────────────────────────
@@ -382,13 +419,29 @@ public class VoxelWorld : MonoBehaviour
         var existing   = GetChunk(coord);
         var neighbours = buildMesh ? ChunkRenderer.FetchNeighbours(coord, GetChunk) : null;
         var settings   = GetTerrainSettings();
+        bool dataOnly  = !buildMesh;
+        var  token     = _generationCts.Token; // snapshot — immune to later CTS replacement
 
         Task.Run(async () =>
         {
-            await _semaphore.WaitAsync();
+            // WaitAsync respects cancellation: if the player moves before this task
+            // acquires the semaphore, it throws OperationCanceledException immediately,
+            // freeing the slot for higher-priority new-position tasks.
             try
             {
-                var chunk = existing ?? GenerateChunkData(coord, settings);
+                await _semaphore.WaitAsync(token);
+            }
+            catch (OperationCanceledException)
+            {
+                // Notify the main thread to remove this coord from _inFlight
+                // so it can be re-requested at the new position if still desired.
+                _cancelledCoords.Enqueue(coord);
+                return;
+            }
+
+            try
+            {
+                var chunk = existing ?? GenerateChunkData(coord, settings, dataOnly);
                 var mesh  = buildMesh ? ChunkRenderer.BuildMeshData(chunk, neighbours, 0) : null;
                 _readyQueue.Enqueue(new ChunkBuildResult(coord, chunk, mesh));
             }
@@ -553,18 +606,43 @@ public class VoxelWorld : MonoBehaviour
         snowAltitude   = snowAltitude,
     };
 
-    private static PaletteChunk GenerateChunkData(Vector3Int coord, in TerrainSettings s)
+    private static PaletteChunk GenerateChunkData(Vector3Int coord, in TerrainSettings s,
+                                                   bool lowDetail = false)
     {
         var chunk   = new PaletteChunk();
         int offsetX = coord.x * PaletteChunk.Size;
         int offsetY = coord.y * PaletteChunk.Size;
         int offsetZ = coord.z * PaletteChunk.Size;
+        int chunkTop = offsetY + PaletteChunk.Size - 1;
 
+        // ── Fast-path: chunk is entirely above or below terrain ───────────────
+        // Sample the 4 corners (4 noise calls) to get a conservative surface range.
+        // This skips the full 256-column pass for the majority of aerial and deep chunks.
+        int minSurface = int.MaxValue, maxSurface = int.MinValue;
+        for (int cz = 0; cz <= PaletteChunk.Size; cz += PaletteChunk.Size)
+        for (int cx = 0; cx <= PaletteChunk.Size; cx += PaletteChunk.Size)
+        {
+            int h = TerrainGenerator.GetSurface(offsetX + cx, offsetZ + cz, s, lowDetail);
+            if (h < minSurface) minSurface = h;
+            if (h > maxSurface) maxSurface = h;
+        }
+
+        // All voxels below min surface minus dirt depth → solid stone
+        if (chunkTop < minSurface - s.dirtDepth)
+        {
+            chunk.FillAll(BlockType.Stone);
+            return chunk;
+        }
+
+        // All voxels above max surface and above sea level → empty air (default)
+        if (offsetY > maxSurface && offsetY > s.seaLevel)
+            return chunk;
+
+        // ── Full per-column pass ──────────────────────────────────────────────
         for (int z = 0; z < PaletteChunk.Size; z++)
         for (int x = 0; x < PaletteChunk.Size; x++)
         {
-            // Pre-compute surface once per column — TerrainGenerator.GetBlock reuses it
-            int surface = TerrainGenerator.GetSurface(offsetX + x, offsetZ + z, s);
+            int surface = TerrainGenerator.GetSurface(offsetX + x, offsetZ + z, s, lowDetail);
 
             for (int y = 0; y < PaletteChunk.Size; y++)
             {

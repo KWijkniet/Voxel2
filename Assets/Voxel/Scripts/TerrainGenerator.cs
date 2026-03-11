@@ -50,25 +50,32 @@ public static class TerrainGenerator
 {
     // ── Public API ────────────────────────────────────────────────────────────
 
-    /// <summary>Returns the surface height (in world voxels) at (worldX, worldZ).</summary>
-    public static int GetSurface(int worldX, int worldZ, in TerrainSettings s)
+    /// <summary>
+    /// Returns the surface height (in world voxels) at (worldX, worldZ).
+    /// lowDetail = true uses fewer noise octaves — safe for region backing chunks
+    /// that are only sampled every 4+ voxels. Saves ~40% of noise calls.
+    /// </summary>
+    public static int GetSurface(int worldX, int worldZ, in TerrainSettings s, bool lowDetail = false)
     {
         float wx = worldX, wz = worldZ;
 
-        // 1. Domain warp — two independent noise channels shift the sample point
+        // 1. Domain warp — one octave is enough for region-distance chunks
         if (s.warpStrength > 0f)
         {
-            float dX = FBM(wx * s.warpScale,         wz * s.warpScale,         2, 0.5f, 2f);
-            float dZ = FBM(wx * s.warpScale + 3.71f, wz * s.warpScale + 1.57f, 2, 0.5f, 2f);
+            int warpOctaves = lowDetail ? 1 : 2;
+            float dX = FBM(wx * s.warpScale,         wz * s.warpScale,         warpOctaves, 0.5f, 2f);
+            float dZ = FBM(wx * s.warpScale + 3.71f, wz * s.warpScale + 1.57f, warpOctaves, 0.5f, 2f);
             wx += (dX - 0.5f) * s.warpStrength * 2f;
             wz += (dZ - 0.5f) * s.warpStrength * 2f;
         }
 
         // 2. FBM terrain noise → [0,1]
-        float fbm = FBM(wx * s.noiseScale, wz * s.noiseScale, s.octaves, s.persistence, s.lacunarity);
+        int terrainOctaves = lowDetail ? Mathf.Max(2, s.octaves - 2) : s.octaves;
+        float fbm = FBM(wx * s.noiseScale, wz * s.noiseScale, terrainOctaves, s.persistence, s.lacunarity);
 
-        // 3. Biome — deliberately offset so it doesn't correlate with terrain noise
-        float biome = FBM(worldX * s.biomeScale + 100.3f, worldZ * s.biomeScale + 100.7f, 3, 0.6f, 2f);
+        // 3. Biome — two octaves sufficient for region-distance transitions
+        int biomeOctaves = lowDetail ? 2 : 3;
+        float biome = FBM(worldX * s.biomeScale + 100.3f, worldZ * s.biomeScale + 100.7f, biomeOctaves, 0.6f, 2f);
 
         // 4. Per-biome height curves
         float oceanH  = s.seaLevel  - s.oceanDepth  + fbm * s.oceanDepth * 0.5f;

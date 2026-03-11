@@ -275,7 +275,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 70aa573b684399741ab0811235d6e0ba, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VoxelWorld
-  viewDistance: 32
+  viewDistance: 16
   verticalChunks: 16
   player: {fileID: 1120276404}
   seaLevel: 20
@@ -296,11 +296,11 @@ MonoBehaviour:
   chunkMaterial: {fileID: 2100000, guid: 915577a1428a176489884433fbc104de, type: 2}
   maxConcurrentTasks: 10
   maxApplyPerFrame: 8
-  maxRequestsPerUpdate: 32
+  maxRequestsPerUpdate: 16
   lodLevels: 1
   frustumBypassRadius: 2
   cameraRotationThreshold: 0.98
-  disableOutsideFrustum: 1
+  disableOutsideFrustum: 0
 --- !u!4 &989120344
 Transform:
   m_ObjectHideFlags: 0

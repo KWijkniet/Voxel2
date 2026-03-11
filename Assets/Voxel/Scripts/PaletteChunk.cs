@@ -19,10 +19,18 @@ public class PaletteChunk
     private uint[] _data;
     private int _bitsPerIndex;
 
+    // O(1) reverse lookup: block type → palette index.
+    // 255 = "not in palette yet". Air is always at index 0.
+    private readonly byte[] _blockToIndex = new byte[256];
+
     public PaletteChunk()
     {
         _bitsPerIndex = 1;
         _data = AllocData(_bitsPerIndex);
+
+        // Initialise all as "not in palette", then register Air at index 0
+        for (int i = 0; i < 256; i++) _blockToIndex[i] = 255;
+        _blockToIndex[BlockType.Air] = 0;
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -35,14 +43,45 @@ public class PaletteChunk
 
     public void SetBlock(int x, int y, int z, byte blockType)
     {
-        int paletteIndex = _palette.IndexOf(blockType);
-        if (paletteIndex < 0)
+        int paletteIndex = _blockToIndex[blockType];
+        if (paletteIndex == 255) // not yet in palette
         {
             paletteIndex = _palette.Count;
             _palette.Add(blockType);
-            GrowIfNeeded(); // may repack _data with more bits
+            _blockToIndex[blockType] = (byte)paletteIndex;
+            GrowIfNeeded();
         }
         WriteBits(Flatten(x, y, z), paletteIndex);
+    }
+
+    /// <summary>
+    /// Fill every voxel with a single block type in O(n/32) time —
+    /// far faster than calling SetBlock 4096 times for uniform chunks.
+    /// </summary>
+    public void FillAll(byte blockType)
+    {
+        // Reset palette and lookup table
+        _palette.Clear();
+        _palette.Add(BlockType.Air);
+        for (int i = 0; i < 256; i++) _blockToIndex[i] = 255;
+        _blockToIndex[BlockType.Air] = 0;
+
+        if (blockType == BlockType.Air)
+        {
+            // All-air: 1 bit per voxel, all zero (default)
+            _bitsPerIndex = 1;
+            _data = AllocData(1);
+            return;
+        }
+
+        _palette.Add(blockType);
+        _blockToIndex[blockType] = 1;
+        _bitsPerIndex = 1;
+        _data = AllocData(1);
+
+        // Index 1 = blockType. Set every bit to 1 → every voxel = index 1.
+        for (int i = 0; i < _data.Length; i++)
+            _data[i] = uint.MaxValue;
     }
 
     public bool IsSolid(int x, int y, int z)
@@ -57,19 +96,16 @@ public class PaletteChunk
     private int ReadBits(int voxelIndex)
     {
         int bitIndex  = voxelIndex * _bitsPerIndex;
-        int wordIndex = bitIndex >> 5;        // / 32
-        int bitOffset = bitIndex & 31;        // % 32
+        int wordIndex = bitIndex >> 5;
+        int bitOffset = bitIndex & 31;
         uint mask = (1u << _bitsPerIndex) - 1u;
 
         if (bitOffset + _bitsPerIndex <= 32)
             return (int)((_data[wordIndex] >> bitOffset) & mask);
 
-        // Spans two words
         int bitsInFirst = 32 - bitOffset;
-        uint lo = (_data[wordIndex]     >> bitOffset);
-        uint hi = (_data[wordIndex + 1] << bitsInFirst);  // shift left to align, then mask
-        // Reconstruct: lo has bitsInFirst bits, hi contributes the rest
-        hi = _data[wordIndex + 1] & (mask >> bitsInFirst);
+        uint lo = (_data[wordIndex] >> bitOffset);
+        uint hi = _data[wordIndex + 1] & (mask >> bitsInFirst);
         return (int)((lo & ((1u << bitsInFirst) - 1u)) | (hi << bitsInFirst));
     }
 
@@ -87,7 +123,6 @@ public class PaletteChunk
             return;
         }
 
-        // Spans two words
         int bitsInFirst = 32 - bitOffset;
         _data[wordIndex] = (_data[wordIndex] & ~(mask << bitOffset))
                          | ((uint)value << bitOffset);
@@ -103,7 +138,6 @@ public class PaletteChunk
         int needed = BitsRequired(_palette.Count);
         if (needed <= _bitsPerIndex) return;
 
-        // Read all current indices at old bit width, then repack at new width
         var indices = new int[VoxelCount];
         for (int i = 0; i < VoxelCount; i++)
             indices[i] = ReadBits(i);
