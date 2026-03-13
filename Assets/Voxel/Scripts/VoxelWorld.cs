@@ -77,10 +77,6 @@ public class VoxelWorld : MonoBehaviour
     [Range(0, 3)]
     public int lodLevels = 2;
 
-    [Header("Culling")]
-    public int   frustumBypassRadius     = 2;
-    [Range(0.9f, 1f)]
-    public float cameraRotationThreshold = 0.98f;
 
     // ── Derived ───────────────────────────────────────────────────────────────
 
@@ -164,6 +160,9 @@ public class VoxelWorld : MonoBehaviour
     private readonly List<Vector3Int> _scratchRegionsToProc = new();
     private readonly List<int>        _scratchCompletedIdx  = new();
     private readonly List<int>        _scratchRemoveIdx     = new();
+    // Persistent distance-sort scratch — avoids per-frame Dictionary allocation in UpdateLoadedChunks.
+    private readonly Dictionary<Vector3Int, float> _scratchChunkDist  = new();
+    private readonly Dictionary<Vector3Int, float> _scratchRegionDist = new();
 
     // ── Unity ─────────────────────────────────────────────────────────────────
 
@@ -172,7 +171,6 @@ public class VoxelWorld : MonoBehaviour
         _semaphore = new SemaphoreSlim(maxConcurrentTasks, maxConcurrentTasks);
         if (chunkMaterial == null)
             chunkMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
-        _lastCameraForward = Camera.main != null ? Camera.main.transform.forward : Vector3.forward;
         UpdateLoadedChunks(true);
     }
 
@@ -196,7 +194,6 @@ public class VoxelWorld : MonoBehaviour
         // before UpdateLoadedChunks runs — preventing an Abs(int.MinValue) overflow.
         bool lodChanged  = CheckLodSettingsChanged();
         bool posChanged  = CheckPositionChanged();
-        bool rotChanged  = CheckRotationChanged();
 
         // Remove cancelled task markers so those coords can be re-requested
         bool anyDrained = false;
@@ -211,28 +208,25 @@ public class VoxelWorld : MonoBehaviour
             anyDrained = true;
         }
 
-        if (posChanged || rotChanged || lodChanged)
+        if (posChanged || lodChanged)
         {
             // Cancel all tasks waiting for the semaphore — they're for the old position
             // and would block new high-priority tasks for the current position.
-            if (posChanged || lodChanged)
+            _generationCts.Cancel();
+            _generationCts.Dispose();
+            _generationCts = new CancellationTokenSource();
+
+            // Mark all pending Burst generation jobs as discarded.
+            // We cannot cancel them mid-execution; they will complete naturally
+            // and be disposed in ProcessCompletedGenerationJobs without enqueuing results.
+            for (int i = 0; i < _pendingGenerationJobs.Count; i++)
             {
-                _generationCts.Cancel();
-                _generationCts.Dispose();
-                _generationCts = new CancellationTokenSource();
-
-                // Mark all pending Burst generation jobs as discarded.
-                // We cannot cancel them mid-execution; they will complete naturally
-                // and be disposed in ProcessCompletedGenerationJobs without enqueuing results.
-                for (int i = 0; i < _pendingGenerationJobs.Count; i++)
-                {
-                    var pj = _pendingGenerationJobs[i];
-                    pj.Discarded = true;
-                    _pendingGenerationJobs[i] = pj;
-                }
-
-                if (posChanged) TerrainGenerator.ClearSurfaceCache();
+                var pj = _pendingGenerationJobs[i];
+                pj.Discarded = true;
+                _pendingGenerationJobs[i] = pj;
             }
+
+            if (posChanged) TerrainGenerator.ClearSurfaceCache();
             UpdateLoadedChunks(posChanged || lodChanged);
         }
 
@@ -254,7 +248,6 @@ public class VoxelWorld : MonoBehaviour
     // ── Change detection ──────────────────────────────────────────────────────
 
     private Vector3Int _lastPlayerChunk   = new Vector3Int(int.MaxValue, 0, 0);
-    private Vector3    _lastCameraForward = Vector3.forward;
     private int        _lastLodLevels     = -1;
     private int        _lastViewDistance  = -1;
 
@@ -273,16 +266,6 @@ public class VoxelWorld : MonoBehaviour
         var cur = WorldToChunkCoord(player != null ? player.position : Vector3.zero);
         if (cur == _lastPlayerChunk) return false;
         _lastPlayerChunk = cur;
-        return true;
-    }
-
-    private bool CheckRotationChanged()
-    {
-        var cam = Camera.main;
-        if (cam == null) return false;
-        var fwd = cam.transform.forward;
-        if (Vector3.Dot(fwd, _lastCameraForward) >= cameraRotationThreshold) return false;
-        _lastCameraForward = fwd;
         return true;
     }
 
@@ -384,17 +367,12 @@ public class VoxelWorld : MonoBehaviour
 
         // Pre-compute squared distances once; Sort's comparator would otherwise call
         // ChunkCenterWorld on both sides of every comparison — O(n log n) redundant calls.
-        var chunkDistSq = new Dictionary<Vector3Int, float>(toRequestC.Count);
+        _scratchChunkDist.Clear();
         foreach (var c in toRequestC)
-            chunkDistSq[c] = ChunkCenterWorld(c).sqrMagnitude_To(playerPos);
-        toRequestC.Sort((a, b) => chunkDistSq[a].CompareTo(chunkDistSq[b]));
+            _scratchChunkDist[c] = ChunkCenterWorld(c).sqrMagnitude_To(playerPos);
+        toRequestC.Sort((a, b) => _scratchChunkDist[a].CompareTo(_scratchChunkDist[b]));
 
-        Plane[] planes = null;
-        var cam = Camera.main;
-        if (cam != null) planes = GeometryUtility.CalculateFrustumPlanes(cam);
-        float bypassSq = (frustumBypassRadius * PaletteChunk.Size) * (frustumBypassRadius * (float)PaletteChunk.Size);
-
-        // Limit submissions per call so the closest in-frustum chunks always get priority.
+        // Limit submissions per call so the closest chunks always get priority.
         // toRequestC is already distance-sorted, so breaking early drops far chunks.
         int lod0Budget = Mathf.Max(4, maxRequestsPerUpdate / 2);
         int lod0Submitted = 0;
@@ -402,17 +380,11 @@ public class VoxelWorld : MonoBehaviour
         foreach (var coord in toRequestC)
         {
             if (lod0Submitted >= lod0Budget) break;
-            var   center = ChunkCenterWorld(coord);
-            float distSq = (center - playerPos).sqrMagnitude;
-            if (distSq <= bypassSq || planes == null ||
-                GeometryUtility.TestPlanesAABB(planes, ChunkBounds(coord)))
-            {
-                RequestChunk(coord, buildMesh: true);
-                lod0Submitted++;
-            }
+            RequestChunk(coord, buildMesh: true);
+            lod0Submitted++;
         }
 
-        // ── Process desired regions (sorted by distance, frustum culled) ─────────
+        // ── Process desired regions (sorted by distance) ──────────────────────────
         _scratchRegionsToProc.Clear();
         var regionsToProcess = _scratchRegionsToProc;
         foreach (var regionCoord in _desiredRegions)
@@ -425,18 +397,14 @@ public class VoxelWorld : MonoBehaviour
                 if (_regionStep.TryGetValue(regionCoord, out int cur) && cur == wantedStep) continue;
             }
 
-            // Frustum cull — regions are always beyond the bypass radius so no bypass check needed
-            if (planes != null && !GeometryUtility.TestPlanesAABB(planes, RegionBounds(regionCoord)))
-                continue;
-
             regionsToProcess.Add(regionCoord);
         }
 
         // Nearest regions first — pre-compute distances to avoid redundant calls in Sort.
-        var regionDistSq = new Dictionary<Vector3Int, float>(regionsToProcess.Count);
+        _scratchRegionDist.Clear();
         foreach (var r in regionsToProcess)
-            regionDistSq[r] = RegionCenterWorld(r).sqrMagnitude_To(playerPos);
-        regionsToProcess.Sort((a, b) => regionDistSq[a].CompareTo(regionDistSq[b]));
+            _scratchRegionDist[r] = RegionCenterWorld(r).sqrMagnitude_To(playerPos);
+        regionsToProcess.Sort((a, b) => _scratchRegionDist[a].CompareTo(_scratchRegionDist[b]));
 
         // Region data requests use the other half of the budget.
         // Without a cap, a single UpdateLoadedChunks call could submit 50 regions × 48 chunks
@@ -454,8 +422,18 @@ public class VoxelWorld : MonoBehaviour
 
             if (!_regions.TryGetValue(regionCoord, out var region))
             {
+                // First visit: create and immediately feed all already-available chunk data.
                 region = new RegionData(verticalChunks);
                 _regions[regionCoord] = region;
+            }
+            else if (regionDataSubmitted >= regionDataBudget)
+            {
+                // Return visit with no budget: skip the 48-slot inner loop.
+                // TryFeedChunkIntoRegion (called from ApplyReadyChunks) handles feeding as
+                // data tasks complete, and triggers RequestRegionMesh when the region is full.
+                // Cancelled chunk slots will be re-requested next time budget is available.
+                if (region.IsComplete) RequestRegionMesh(regionCoord, region, wantedStep);
+                continue;
             }
 
             // Feed already-available chunk data; request the rest (within budget)

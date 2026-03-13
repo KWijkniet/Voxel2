@@ -342,11 +342,9 @@ MonoBehaviour:
   snowAltitude: 75
   chunkMaterial: {fileID: 2100000, guid: 915577a1428a176489884433fbc104de, type: 2}
   maxConcurrentTasks: 10
-  maxApplyPerFrame: 6
+  maxApplyPerFrame: 12
   maxRequestsPerUpdate: 16
-  lodLevels: 1
-  frustumBypassRadius: 2
-  cameraRotationThreshold: 0.98
+  lodLevels: 3
 --- !u!4 &989120344
 Transform:
   m_ObjectHideFlags: 0

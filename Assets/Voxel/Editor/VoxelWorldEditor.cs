@@ -106,10 +106,9 @@ public class VoxelWorldEditor : Editor
             Mathf.FloorToInt(origin.x / PaletteChunk.Size), 0,
             Mathf.FloorToInt(origin.z / PaletteChunk.Size));
 
-        float cs        = PaletteChunk.Size;
-        float bypassSq  = (world.frustumBypassRadius * cs) * (world.frustumBypassRadius * cs);
-        int   aligned   = world.AlignedViewDistance;
-        int   maxR      = aligned * (1 << world.lodLevels);
+        float cs      = PaletteChunk.Size;
+        int   aligned = world.AlignedViewDistance;
+        int   maxR    = aligned * (1 << world.lodLevels);
 
         // ── LOD 0 zone: individual chunks ─────────────────────────────────────
         for (int x = -aligned; x <= aligned; x++)
@@ -118,15 +117,11 @@ public class VoxelWorldEditor : Editor
         {
             var coord  = new Vector3Int(pChunk.x + x, y, pChunk.z + z);
             var center = new Vector3(coord.x * cs + cs * 0.5f, coord.y * cs + cs * 0.5f, coord.z * cs + cs * 0.5f);
-            float distSq = (center - origin).sqrMagnitude;
-            bool inBypass = distSq <= bypassSq;
             bool inFrustum = GeometryUtility.TestPlanesAABB(planes, new Bounds(center, Vector3.one * cs));
 
-            Handles.color = !inBypass && !inFrustum
-                ? new Color(1f, 0.2f, 0.2f, 0.12f)
-                : inBypass
-                    ? new Color(0.2f, 1f, 0.2f, 0.6f)
-                    : new Color(0.2f, 0.8f, 1f, 0.4f);
+            Handles.color = inFrustum
+                ? new Color(0.2f, 0.8f, 1f, 0.4f)
+                : new Color(1f, 0.2f, 0.2f, 0.12f);
             Handles.DrawWireCube(center, Vector3.one * cs);
         }
 
