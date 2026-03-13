@@ -162,6 +162,8 @@ public class VoxelWorld : MonoBehaviour
     private readonly List<Vector3Int> _scratchEvictR        = new();
     private readonly List<Vector3Int> _scratchRequestC      = new();
     private readonly List<Vector3Int> _scratchRegionsToProc = new();
+    private readonly List<int>        _scratchCompletedIdx  = new();
+    private readonly List<int>        _scratchRemoveIdx     = new();
 
     // ── Unity ─────────────────────────────────────────────────────────────────
 
@@ -580,21 +582,46 @@ public class VoxelWorld : MonoBehaviour
     /// is now complete, builds the PaletteChunk from the NativeArray result,
     /// and either enqueues a data-only result or kicks off an async mesh build.
     /// Discarded jobs (player moved) are disposed without enqueueing.
+    ///
+    /// Completed jobs are sorted closest-first before processing so the per-frame
+    /// budget always goes to the nearest chunks, not whichever happened to finish last.
     /// </summary>
     private void ProcessCompletedGenerationJobs()
     {
-        int tasksBudget = maxApplyPerFrame; // cap only on non-discarded jobs that kick off Task.Runs
-        for (int i = _pendingGenerationJobs.Count - 1; i >= 0; i--)
-        {
-            var pj = _pendingGenerationJobs[i];
-            if (!pj.Handle.IsCompleted) continue;
+        // Collect indices of all completed jobs.
+        _scratchCompletedIdx.Clear();
+        for (int i = 0; i < _pendingGenerationJobs.Count; i++)
+            if (_pendingGenerationJobs[i].Handle.IsCompleted)
+                _scratchCompletedIdx.Add(i);
 
-            // Discarded jobs are cheap (just Dispose + enqueue) — always drain them immediately.
+        if (_scratchCompletedIdx.Count == 0) return;
+
+        // Sort: non-discarded closest-first so the budget always goes to the nearest chunks.
+        // Discarded jobs are partitioned to the end — they are always drained (no budget cost).
+        var pc = _lastPlayerChunk;
+        _scratchCompletedIdx.Sort((a, b) =>
+        {
+            var ja = _pendingGenerationJobs[a];
+            var jb = _pendingGenerationJobs[b];
+            if (ja.Discarded != jb.Discarded) return ja.Discarded ? 1 : -1; // discarded last
+            int da = Mathf.Max(Mathf.Abs(ja.Coord.x - pc.x), Mathf.Abs(ja.Coord.z - pc.z));
+            int db = Mathf.Max(Mathf.Abs(jb.Coord.x - pc.x), Mathf.Abs(jb.Coord.z - pc.z));
+            return da.CompareTo(db);
+        });
+
+        int tasksBudget = maxApplyPerFrame;
+        _scratchRemoveIdx.Clear();
+
+        foreach (int idx in _scratchCompletedIdx)
+        {
+            var pj = _pendingGenerationJobs[idx];
+
+            // Discarded jobs are cheap (Dispose + enqueue) — always drain regardless of budget.
             // Only non-discarded jobs that kick off background tasks count against the budget.
             if (!pj.Discarded && tasksBudget <= 0) continue;
 
             pj.Handle.Complete(); // Required even when IsCompleted — finalises the job
-            _pendingGenerationJobs.RemoveAt(i);
+            _scratchRemoveIdx.Add(idx);
 
             if (pj.Discarded)
             {
@@ -627,7 +654,7 @@ public class VoxelWorld : MonoBehaviour
                         var chunk = BuildPaletteChunkFromBlocks(dataBlocks);
                         _readyQueue.Enqueue(new ChunkBuildResult(dataCoord, chunk, null));
                     }
-                    catch { _cancelledCoords.Enqueue(dataCoord); } // free _inFlight on any failure
+                    catch { _cancelledCoords.Enqueue(dataCoord); }
                 });
                 continue;
             }
@@ -651,10 +678,16 @@ public class VoxelWorld : MonoBehaviour
                     var mesh = ChunkRenderer.BuildMeshData(chunk, neighbours, 0);
                     _readyQueue.Enqueue(new ChunkBuildResult(coord, chunk, mesh));
                 }
-                catch { _cancelledCoords.Enqueue(coord); } // free _inFlight so coord can be re-requested
+                catch { _cancelledCoords.Enqueue(coord); }
                 finally { _semaphore.Release(); }
             });
         }
+
+        // Remove processed entries. Sort descending so higher indices are removed first,
+        // keeping all lower indices valid throughout.
+        _scratchRemoveIdx.Sort((a, b) => b.CompareTo(a));
+        foreach (int idx in _scratchRemoveIdx)
+            _pendingGenerationJobs.RemoveAt(idx);
     }
 
     private static PaletteChunk BuildPaletteChunkFromBlocks(byte[] blocks)
