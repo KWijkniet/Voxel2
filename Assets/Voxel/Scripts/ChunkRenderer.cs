@@ -6,6 +6,7 @@ using UnityEngine.Rendering;
 /// <summary>
 /// Raw mesh arrays produced on a background thread.
 /// Passed to ApplyMeshData on the main thread to create the Unity Mesh.
+/// Bounds are pre-computed so the main thread can skip RecalculateBounds.
 /// </summary>
 public sealed class MeshData
 {
@@ -13,9 +14,10 @@ public sealed class MeshData
     public readonly Vector3[] Normals;
     public readonly Vector2[] UVs;
     public readonly int[]     Triangles;
+    public readonly Bounds    Bounds;
 
-    public MeshData(Vector3[] v, Vector3[] n, Vector2[] u, int[] t)
-    { Vertices = v; Normals = n; UVs = u; Triangles = t; }
+    public MeshData(Vector3[] v, Vector3[] n, Vector2[] u, int[] t, Bounds bounds)
+    { Vertices = v; Normals = n; UVs = u; Triangles = t; Bounds = bounds; }
 
     public bool IsEmpty => Vertices.Length == 0;
 }
@@ -79,7 +81,17 @@ public class ChunkRenderer : MonoBehaviour
 
         RunGreedyMesh(chunk, neighbours, _vertsTS, _normsTS, _uvsTS, _trisTS, _maskTS, step);
 
-        return new MeshData(_vertsTS.ToArray(), _normsTS.ToArray(), _uvsTS.ToArray(), _trisTS.ToArray());
+        int s = PaletteChunk.Size;
+        var bounds = new Bounds(new Vector3(s * .5f, s * .5f, s * .5f), new Vector3(s, s, s));
+        return new MeshData(_vertsTS.ToArray(), _normsTS.ToArray(), _uvsTS.ToArray(), _trisTS.ToArray(), bounds);
+    }
+
+    /// <summary>Creates a Unity Mesh from pre-built MeshData without a GameObject. Must be called on the main thread.</summary>
+    public static Mesh CreateMesh(MeshData data)
+    {
+        if (data.IsEmpty) return null;
+        var fmt = data.Vertices.Length > ushort.MaxValue ? IndexFormat.UInt32 : IndexFormat.UInt16;
+        return UploadMesh(data.Vertices, data.Normals, data.UVs, data.Triangles, data.Bounds, fmt);
     }
 
     /// <summary>Applies pre-built MeshData to this renderer. Must be called on the main thread.</summary>
@@ -90,9 +102,8 @@ public class ChunkRenderer : MonoBehaviour
 
         _meshRenderer.sharedMaterial = material;
         if (data.IsEmpty) { _meshFilter.sharedMesh = null; return; }
-        // Auto-select index format: regions can exceed the 65 535 UInt16 limit
         var fmt = data.Vertices.Length > ushort.MaxValue ? IndexFormat.UInt32 : IndexFormat.UInt16;
-        _meshFilter.sharedMesh = UploadMesh(data.Vertices, data.Normals, data.UVs, data.Triangles, fmt);
+        _meshFilter.sharedMesh = UploadMesh(data.Vertices, data.Normals, data.UVs, data.Triangles, data.Bounds, fmt);
     }
 
     public void Clear()
@@ -302,8 +313,9 @@ public class ChunkRenderer : MonoBehaviour
         GreedyMeshFaceRegion(region, neighbours[4], 2, 0, 1, Vector3.forward, false, _vertsTS, _normsTS, _uvsTS, _trisTS, _maskTS, step);
         GreedyMeshFaceRegion(region, neighbours[5], 2, 0, 1, Vector3.back,    true,  _vertsTS, _normsTS, _uvsTS, _trisTS, _maskTS, step);
 
-        // Return raw arrays only — Mesh creation must happen on the main thread
-        return new MeshData(_vertsTS.ToArray(), _normsTS.ToArray(), _uvsTS.ToArray(), _trisTS.ToArray());
+        float sx = region.VoxelSizeX, sy = region.VoxelSizeY, sz = region.VoxelSizeZ;
+        var bounds = new Bounds(new Vector3(sx * .5f, sy * .5f, sz * .5f), new Vector3(sx, sy, sz));
+        return new MeshData(_vertsTS.ToArray(), _normsTS.ToArray(), _uvsTS.ToArray(), _trisTS.ToArray(), bounds);
     }
 
     /// <summary>
@@ -423,13 +435,15 @@ public class ChunkRenderer : MonoBehaviour
     }
 
     private static Mesh UploadMesh(Vector3[] verts, Vector3[] norms, Vector2[] uvs, int[] tris,
-                                    IndexFormat fmt = IndexFormat.UInt16)
+                                    Bounds bounds, IndexFormat fmt = IndexFormat.UInt16)
     {
         var mesh = new Mesh { name = "Chunk" };
         mesh.indexFormat = fmt;
         mesh.SetVertices(verts); mesh.SetNormals(norms);
         mesh.SetUVs(0, uvs); mesh.SetTriangles(tris, 0);
-        mesh.RecalculateBounds(); mesh.UploadMeshData(true);
+        // Bounds were pre-computed on the background thread — skip the O(vertices) RecalculateBounds.
+        mesh.bounds = bounds;
+        mesh.UploadMeshData(true);
         return mesh;
     }
 }

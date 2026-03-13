@@ -12,10 +12,10 @@ using Unity.Mathematics;
 /// Two-tier LOD rendering:
 ///
 ///   LOD 0 (within viewDistance):
-///     Individual 16³ chunk GameObjects, full-detail mesh.
+///     Individual 16³ chunk meshes, full-detail. Drawn via Graphics.DrawMesh — no GameObjects.
 ///
 ///   LOD 1+ (beyond viewDistance, within MaxRadius):
-///     4×vc×4 chunk groups (Regions) rendered as ONE GameObject per group.
+///     4×vc×4 chunk groups (Regions) rendered as ONE mesh per group via Graphics.DrawMesh.
 ///     Step = 4 voxels/cell at LOD 1, 8 at LOD 2, 16 at LOD 3.
 ///     Reduces draw calls from ~4096 to ~256 at the outer ring.
 ///
@@ -81,7 +81,6 @@ public class VoxelWorld : MonoBehaviour
     public int   frustumBypassRadius     = 2;
     [Range(0.9f, 1f)]
     public float cameraRotationThreshold = 0.98f;
-    public bool  disableOutsideFrustum   = true;
 
     // ── Derived ───────────────────────────────────────────────────────────────
 
@@ -101,7 +100,7 @@ public class VoxelWorld : MonoBehaviour
     // ── LOD 0 storage (individual chunks) ─────────────────────────────────────
 
     private readonly Dictionary<Vector3Int, PaletteChunk> _chunks        = new();
-    private readonly Dictionary<Vector3Int, GameObject>   _renderers     = new();
+    private readonly Dictionary<Vector3Int, Mesh>         _chunkMeshes   = new();
     private readonly HashSet<Vector3Int>                  _desiredCoords = new();
     private readonly HashSet<Vector3Int>                  _inFlight      = new();
     private readonly ConcurrentQueue<ChunkBuildResult>    _readyQueue    = new();
@@ -129,9 +128,9 @@ public class VoxelWorld : MonoBehaviour
 
     // ── LOD 1+ storage (regions) ──────────────────────────────────────────────
 
-    private readonly Dictionary<Vector3Int, RegionData>  _regions          = new();
-    private readonly Dictionary<Vector3Int, GameObject>  _regionRenderers  = new();
-    private readonly Dictionary<Vector3Int, int>          _regionStep       = new();
+    private readonly Dictionary<Vector3Int, RegionData>  _regions       = new();
+    private readonly Dictionary<Vector3Int, Mesh>         _regionMeshes  = new();
+    private readonly Dictionary<Vector3Int, int>          _regionStep    = new();
     private readonly HashSet<Vector3Int>                  _desiredRegions   = new();
     private readonly HashSet<Vector3Int>                  _regionInFlight   = new();
     private readonly ConcurrentQueue<RegionBuildResult>   _regionReadyQueue = new();
@@ -145,8 +144,6 @@ public class VoxelWorld : MonoBehaviour
     }
 
     private SemaphoreSlim _semaphore;
-    // Triggers a visibility pass when the frustum or scene content changes
-    private bool _pendingFrustumUpdate;
     // True when the last UpdateLoadedChunks hit the request budget — more batches are needed
     private bool _needsMoreRequests;
 
@@ -175,7 +172,6 @@ public class VoxelWorld : MonoBehaviour
             chunkMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
         _lastCameraForward = Camera.main != null ? Camera.main.transform.forward : Vector3.forward;
         UpdateLoadedChunks(true);
-        _pendingFrustumUpdate = true;
     }
 
     private void OnDestroy()
@@ -236,7 +232,6 @@ public class VoxelWorld : MonoBehaviour
                 if (posChanged) TerrainGenerator.ClearSurfaceCache();
             }
             UpdateLoadedChunks(posChanged || lodChanged);
-            _pendingFrustumUpdate = true;
         }
 
         // Collect any Burst generation jobs that completed this frame and kick off
@@ -246,21 +241,12 @@ public class VoxelWorld : MonoBehaviour
         bool chunksApplied  = ApplyReadyChunks();
         bool regionsApplied = ApplyReadyRegions();
 
-        if (chunksApplied || regionsApplied || anyDrained)
-        {
-            _pendingFrustumUpdate = true;
-            // Tasks completed (or cancelled coords freed) — submit the next batch
-            if (_needsMoreRequests)
-                UpdateLoadedChunks(false);
-        }
+        if ((chunksApplied || regionsApplied || anyDrained) && _needsMoreRequests)
+            UpdateLoadedChunks(false);
 
-        // Only test frustum when the frustum or scene content actually changed,
-        // not every frame — avoids 500+ TestPlanesAABB calls at 60 fps.
-        if (_pendingFrustumUpdate)
-        {
-            UpdateFrustumVisibility();
-            _pendingFrustumUpdate = false;
-        }
+        // Submit all stored meshes to the renderer this frame.
+        // Unity automatically frustum-culls each mesh using its pre-computed bounds.
+        DrawAllMeshes();
     }
 
     // ── Change detection ──────────────────────────────────────────────────────
@@ -358,15 +344,15 @@ public class VoxelWorld : MonoBehaviour
                 }
             }
 
-            // Unload out-of-range individual GOs
+            // Unload out-of-range chunk meshes
             _scratchUnloadC.Clear();
-            foreach (var c in _renderers.Keys)
+            foreach (var c in _chunkMeshes.Keys)
                 if (!_desiredCoords.Contains(c)) _scratchUnloadC.Add(c);
             foreach (var c in _scratchUnloadC) UnloadChunk(c);
 
-            // Unload out-of-range region GOs
+            // Unload out-of-range region meshes
             _scratchUnloadR.Clear();
-            foreach (var r in _regionRenderers.Keys)
+            foreach (var r in _regionMeshes.Keys)
                 if (!_desiredRegions.Contains(r)) _scratchUnloadR.Add(r);
             foreach (var r in _scratchUnloadR) UnloadRegion(r);
 
@@ -388,7 +374,7 @@ public class VoxelWorld : MonoBehaviour
         // ── Request LOD 0 chunks ──────────────────────────────────────────────
         _scratchRequestC.Clear();
         foreach (var coord in _desiredCoords)
-            if (!_renderers.ContainsKey(coord) && !_inFlight.Contains(coord))
+            if (!_chunkMeshes.ContainsKey(coord) && !_inFlight.Contains(coord))
                 _scratchRequestC.Add(coord);
         var toRequestC = _scratchRequestC;
 
@@ -431,7 +417,7 @@ public class VoxelWorld : MonoBehaviour
         {
             // Skip if already rendered at correct step or being built
             if (_regionInFlight.Contains(regionCoord)) continue;
-            if (_regionRenderers.ContainsKey(regionCoord))
+            if (_regionMeshes.ContainsKey(regionCoord))
             {
                 int wantedStep = GetRegionStep(regionCoord);
                 if (_regionStep.TryGetValue(regionCoord, out int cur) && cur == wantedStep) continue;
@@ -461,7 +447,7 @@ public class VoxelWorld : MonoBehaviour
             int wantedStep = GetRegionStep(regionCoord);
 
             // Re-mesh if LOD step changed
-            if (_regionRenderers.ContainsKey(regionCoord))
+            if (_regionMeshes.ContainsKey(regionCoord))
                 UnloadRegion(regionCoord);
 
             if (!_regions.TryGetValue(regionCoord, out var region))
@@ -534,7 +520,7 @@ public class VoxelWorld : MonoBehaviour
         // Jobs are scheduled on the main thread and run on Unity's job worker threads.
         // ProcessCompletedGenerationJobs() polls IsCompleted each Update.
         int size   = PaletteChunk.Size;
-        var blocks = new NativeArray<byte>(size * size * size, Allocator.TempJob);
+        var blocks = new NativeArray<byte>(size * size * size, Allocator.Persistent);
         var job    = new GenerateChunkJob
         {
             Settings   = GetTerrainSettings(),
@@ -568,14 +554,11 @@ public class VoxelWorld : MonoBehaviour
 
             if (result.MeshData != null)
             {
-                // LOD 0 individual GO
-                if (!_renderers.ContainsKey(result.Coord) && _desiredCoords.Contains(result.Coord))
+                // LOD 0 mesh (no GameObject — drawn via Graphics.DrawMesh each frame)
+                if (!_chunkMeshes.ContainsKey(result.Coord) && _desiredCoords.Contains(result.Coord))
                 {
-                    var go = new GameObject($"Chunk {result.Coord.x},{result.Coord.y},{result.Coord.z}");
-                    go.transform.SetParent(transform, false);
-                    go.transform.localPosition = ChunkToWorldPos(result.Coord);
-                    go.AddComponent<ChunkRenderer>().ApplyMeshData(result.MeshData, chunkMaterial);
-                    _renderers[result.Coord] = go;
+                    var mesh = ChunkRenderer.CreateMesh(result.MeshData);
+                    if (mesh != null) _chunkMeshes[result.Coord] = mesh;
                     anyAdded = true;
                 }
             }
@@ -600,10 +583,15 @@ public class VoxelWorld : MonoBehaviour
     /// </summary>
     private void ProcessCompletedGenerationJobs()
     {
+        int tasksBudget = maxApplyPerFrame; // cap only on non-discarded jobs that kick off Task.Runs
         for (int i = _pendingGenerationJobs.Count - 1; i >= 0; i--)
         {
             var pj = _pendingGenerationJobs[i];
             if (!pj.Handle.IsCompleted) continue;
+
+            // Discarded jobs are cheap (just Dispose + enqueue) — always drain them immediately.
+            // Only non-discarded jobs that kick off background tasks count against the budget.
+            if (!pj.Discarded && tasksBudget <= 0) continue;
 
             pj.Handle.Complete(); // Required even when IsCompleted — finalises the job
             _pendingGenerationJobs.RemoveAt(i);
@@ -615,36 +603,61 @@ public class VoxelWorld : MonoBehaviour
                 continue;
             }
 
-            _inFlight.Remove(pj.Coord);
-            var chunk = BuildPaletteChunkFromBlocks(pj.Blocks);
+            tasksBudget--;
+
+            // Copy NativeArray to managed byte[] on the main thread (fast memcpy of 4096 bytes),
+            // then dispose the NativeArray immediately to free unmanaged memory.
+            // BuildPaletteChunkFromBlocks runs on a background thread so the main thread
+            // is not blocked by 4096 SetBlock calls × N completed jobs per frame.
+            var blocksCopy = pj.Blocks.ToArray();
             pj.Blocks.Dispose();
+
+            // _inFlight cleanup is intentionally deferred to ApplyReadyChunks so the coord
+            // stays in _inFlight while the background task is running, preventing duplicate
+            // generation requests for the same coord.
 
             if (!pj.BuildMesh)
             {
-                _readyQueue.Enqueue(new ChunkBuildResult(pj.Coord, chunk, null));
+                var dataCoord  = pj.Coord;
+                var dataBlocks = blocksCopy;
+                Task.Run(() =>
+                {
+                    try
+                    {
+                        var chunk = BuildPaletteChunkFromBlocks(dataBlocks);
+                        _readyQueue.Enqueue(new ChunkBuildResult(dataCoord, chunk, null));
+                    }
+                    catch { _cancelledCoords.Enqueue(dataCoord); } // free _inFlight on any failure
+                });
                 continue;
             }
 
-            // Kick off mesh build on a background thread (semaphore-limited, cancellable).
+            // Kick off chunk build + mesh build on a background thread (semaphore-limited, cancellable).
             var coord      = pj.Coord;
-            var chunkCopy  = chunk;
             var neighbours = pj.Neighbours;
             var token      = _generationCts.Token;
+            var jobBlocks  = blocksCopy;
             Task.Run(async () =>
             {
+                PaletteChunk chunk;
+                try { chunk = BuildPaletteChunkFromBlocks(jobBlocks); }
+                catch { _cancelledCoords.Enqueue(coord); return; }
+
                 try { await _semaphore.WaitAsync(token); }
                 catch (OperationCanceledException) { _cancelledCoords.Enqueue(coord); return; }
+
                 try
                 {
-                    var mesh = ChunkRenderer.BuildMeshData(chunkCopy, neighbours, 0);
-                    _readyQueue.Enqueue(new ChunkBuildResult(coord, chunkCopy, mesh));
+                    var mesh = ChunkRenderer.BuildMeshData(chunk, neighbours, 0);
+                    _readyQueue.Enqueue(new ChunkBuildResult(coord, chunk, mesh));
                 }
+                catch { _cancelledCoords.Enqueue(coord); } // free _inFlight so coord can be re-requested
                 finally { _semaphore.Release(); }
             });
         }
     }
 
-    private static PaletteChunk BuildPaletteChunkFromBlocks(NativeArray<byte> blocks)
+    private static PaletteChunk BuildPaletteChunkFromBlocks(byte[] blocks)
     {
         var chunk = new PaletteChunk();
         // Pre-seed all terrain types so GrowIfNeeded never repacks 4096 voxels mid-fill.
@@ -674,7 +687,7 @@ public class VoxelWorld : MonoBehaviour
 
         if (region.IsComplete && _desiredRegions.Contains(regionCoord)
             && !_regionInFlight.Contains(regionCoord)
-            && !_regionRenderers.ContainsKey(regionCoord))
+            && !_regionMeshes.ContainsKey(regionCoord))
             RequestRegionMesh(regionCoord, region, GetRegionStep(regionCoord));
     }
 
@@ -719,15 +732,12 @@ public class VoxelWorld : MonoBehaviour
         {
             _regionInFlight.Remove(result.RegionCoord);
 
-            if (!_regionRenderers.ContainsKey(result.RegionCoord)
+            if (!_regionMeshes.ContainsKey(result.RegionCoord)
                 && _desiredRegions.Contains(result.RegionCoord))
             {
-                var go = new GameObject($"Region {result.RegionCoord.x},{result.RegionCoord.z}");
-                go.transform.SetParent(transform, false);
-                go.transform.localPosition = RegionWorldPos(result.RegionCoord);
-                go.AddComponent<ChunkRenderer>().ApplyMeshData(result.MeshData, chunkMaterial);
-                _regionRenderers[result.RegionCoord] = go;
-                _regionStep[result.RegionCoord]      = result.Step;
+                var mesh = ChunkRenderer.CreateMesh(result.MeshData);
+                if (mesh != null) _regionMeshes[result.RegionCoord] = mesh;
+                _regionStep[result.RegionCoord] = result.Step;
                 anyAdded = true;
             }
 
@@ -738,37 +748,41 @@ public class VoxelWorld : MonoBehaviour
 
     private void UnloadChunk(Vector3Int coord)
     {
-        if (_renderers.TryGetValue(coord, out var go)) { Destroy(go); _renderers.Remove(coord); }
+        if (_chunkMeshes.TryGetValue(coord, out var mesh)) { Destroy(mesh); _chunkMeshes.Remove(coord); }
     }
 
     private void UnloadRegion(Vector3Int r)
     {
-        if (_regionRenderers.TryGetValue(r, out var go)) { Destroy(go); _regionRenderers.Remove(r); }
+        if (_regionMeshes.TryGetValue(r, out var mesh)) { Destroy(mesh); _regionMeshes.Remove(r); }
         _regionStep.Remove(r);
     }
 
-    // ── Frustum visibility ────────────────────────────────────────────────────
+    // ── Draw meshes ───────────────────────────────────────────────────────────
 
-    private void UpdateFrustumVisibility()
+    /// <summary>
+    /// Submits all loaded chunk and region meshes to Unity's renderer each frame via
+    /// Graphics.DrawMesh. No GameObjects are used. Unity automatically frustum-culls
+    /// each mesh using its pre-computed bounds (set during background mesh build).
+    /// </summary>
+    private void DrawAllMeshes()
     {
-        if (!disableOutsideFrustum) return;
-        var cam = Camera.main;
-        if (cam == null) return;
+        if (chunkMaterial == null) return;
+        var localToWorld = transform.localToWorldMatrix;
 
-        var   planes    = GeometryUtility.CalculateFrustumPlanes(cam);
-        var   playerPos = player != null ? player.position : Vector3.zero;
-        float bypassSq  = (frustumBypassRadius * PaletteChunk.Size) * (frustumBypassRadius * (float)PaletteChunk.Size);
-
-        foreach (var kvp in _renderers)
+        foreach (var kvp in _chunkMeshes)
         {
-            bool visible = (ChunkCenterWorld(kvp.Key) - playerPos).sqrMagnitude <= bypassSq
-                           || GeometryUtility.TestPlanesAABB(planes, ChunkBounds(kvp.Key));
-            if (kvp.Value.activeSelf != visible) kvp.Value.SetActive(visible);
+            if (kvp.Value == null) continue;
+            Graphics.DrawMesh(kvp.Value,
+                              localToWorld * Matrix4x4.Translate(ChunkToWorldPos(kvp.Key)),
+                              chunkMaterial, gameObject.layer);
         }
-        foreach (var kvp in _regionRenderers)
+
+        foreach (var kvp in _regionMeshes)
         {
-            bool visible = GeometryUtility.TestPlanesAABB(planes, RegionBounds(kvp.Key));
-            if (kvp.Value.activeSelf != visible) kvp.Value.SetActive(visible);
+            if (kvp.Value == null) continue;
+            Graphics.DrawMesh(kvp.Value,
+                              localToWorld * Matrix4x4.Translate(RegionWorldPos(kvp.Key)),
+                              chunkMaterial, gameObject.layer);
         }
     }
 

@@ -246,6 +246,53 @@ MonoBehaviour:
   m_ShadowLayerMask: 1
   m_RenderingLayers: 1
   m_ShadowRenderingLayers: 1
+--- !u!1 &247492970
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 247492972}
+  - component: {fileID: 247492971}
+  m_Layer: 0
+  m_Name: ChunkBenchmark
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 0
+--- !u!114 &247492971
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 247492970}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a96c01ef1bd7f1d43ab49c96672e3555, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::ChunkBenchmark
+  world: {fileID: 989120343}
+  chunkCoord: {x: 1, y: 1, z: 1}
+  runOnStart: 1
+--- !u!4 &247492972
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 247492970}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &989120342
 GameObject:
   m_ObjectHideFlags: 0
@@ -276,7 +323,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VoxelWorld
   viewDistance: 16
-  verticalChunks: 16
+  verticalChunks: 3
   player: {fileID: 1120276404}
   seaLevel: 20
   baseHeight: 2
@@ -300,7 +347,6 @@ MonoBehaviour:
   lodLevels: 1
   frustumBypassRadius: 2
   cameraRotationThreshold: 0.98
-  disableOutsideFrustum: 1
 --- !u!4 &989120344
 Transform:
   m_ObjectHideFlags: 0
@@ -478,3 +524,4 @@ SceneRoots:
   - {fileID: 115635957}
   - {fileID: 1120276404}
   - {fileID: 989120344}
+  - {fileID: 247492972}
