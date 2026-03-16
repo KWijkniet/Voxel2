@@ -92,6 +92,22 @@ public class PaletteChunk
     }
 
     /// <summary>
+    /// Bulk-loads 4096 block types from the flat byte array produced by GenerateChunkJob
+    /// (index layout: x + y*16 + z*256). SeedPalette must be called first with every
+    /// block type that appears in the array. Significantly faster than 4096 SetBlock calls —
+    /// skips the palette-registration branch and GrowIfNeeded entirely.
+    /// </summary>
+    public void BulkLoad(byte[] blocks)
+    {
+        for (int i = 0; i < VoxelCount; i++)
+        {
+            byte b = blocks[i];
+            if (b == BlockType.Air) continue; // index 0 = all-zero bits, already initialised
+            WriteBits(i, _blockToIndex[b]);
+        }
+    }
+
+    /// <summary>
     /// Pre-populates the palette with all provided block types and widens _data to the
     /// required final bit-width in one step. Call this BEFORE any SetBlock to avoid
     /// incremental GrowIfNeeded repacks as the palette crosses each bit-width boundary.

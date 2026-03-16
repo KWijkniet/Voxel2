@@ -125,40 +125,46 @@ public class VoxelWorldEditor : Editor
             Handles.DrawWireCube(center, Vector3.one * cs);
         }
 
-        // ── LOD 1+ zone: region outlines ──────────────────────────────────────
+        // ── LOD 1+ zone: region outlines (one ring per LOD level) ────────────
         if (world.lodLevels > 0)
         {
-            float rs = cs * RegionData.HSize; // 64 m per region side
             var drawnRegions = new System.Collections.Generic.HashSet<Vector3Int>();
 
-            for (int x = -maxR; x <= maxR; x++)
-            for (int z = -maxR; z <= maxR; z++)
+            for (int lod = 1; lod <= world.lodLevels; lod++)
             {
-                int dist = Mathf.Max(Mathf.Abs(x), Mathf.Abs(z));
-                if (dist < aligned) continue; // LOD 0 zone already drawn
+                int   hSize       = 1 << lod;
+                float rs          = cs * hSize;
+                int   innerRadius = aligned * (1 << (lod - 1));
+                int   outerRadius = aligned * (1 << lod);
+                int   playerRX    = Mathf.FloorToInt(pChunk.x / (float)hSize);
+                int   playerRZ    = Mathf.FloorToInt(pChunk.z / (float)hSize);
+                int   maxRegionR  = outerRadius / hSize + 1;
+                var   lodColor    = Color.HSVToRGB(0.08f + lod * 0.1f, 0.8f, 0.9f);
 
-                int rx = Mathf.FloorToInt((pChunk.x + x) / (float)RegionData.HSize);
-                int rz = Mathf.FloorToInt((pChunk.z + z) / (float)RegionData.HSize);
-                var regionCoord = new Vector3Int(rx, 0, rz);
-                if (!drawnRegions.Add(regionCoord)) continue;
-
-                var center = new Vector3(rx * rs + rs * 0.5f, 0, rz * rs + rs * 0.5f);
-                bool inFrustum = GeometryUtility.TestPlanesAABB(planes,
-                    new Bounds(center, new Vector3(rs, rs, rs)));
-
-                // Colour by LOD level
-                int radius = aligned; float hue = 0.15f;
-                for (int lod = 1; lod <= world.lodLevels; lod++)
+                for (int rx = -maxRegionR; rx <= maxRegionR; rx++)
+                for (int rz = -maxRegionR; rz <= maxRegionR; rz++)
                 {
-                    if (dist <= radius * 2) { hue = 0.08f + lod * 0.1f; break; }
-                    radius *= 2;
-                }
+                    var regionCoord = new Vector3Int(playerRX + rx, lod, playerRZ + rz);
+                    if (!drawnRegions.Add(regionCoord)) continue;
 
-                var lodColor = Color.HSVToRGB(hue, 0.8f, 0.9f);
-                Handles.color = inFrustum
-                    ? new Color(lodColor.r, lodColor.g, lodColor.b, 0.35f)
-                    : new Color(0.5f, 0.5f, 0.5f, 0.08f);
-                Handles.DrawWireCube(center, new Vector3(rs, rs * 0.5f, rs));
+                    int baseX    = regionCoord.x * hSize;
+                    int baseZ    = regionCoord.z * hSize;
+                    int nearestX = Mathf.Clamp(pChunk.x, baseX, baseX + hSize - 1);
+                    int nearestZ = Mathf.Clamp(pChunk.z, baseZ, baseZ + hSize - 1);
+                    int chebDist = Mathf.Max(Mathf.Abs(nearestX - pChunk.x),
+                                             Mathf.Abs(nearestZ - pChunk.z));
+
+                    if (chebDist >= outerRadius || chebDist < innerRadius) continue;
+
+                    var  center    = new Vector3(regionCoord.x * rs + rs * 0.5f, 0, regionCoord.z * rs + rs * 0.5f);
+                    bool inFrustum = GeometryUtility.TestPlanesAABB(planes,
+                        new Bounds(center, new Vector3(rs, rs, rs)));
+
+                    Handles.color = inFrustum
+                        ? new Color(lodColor.r, lodColor.g, lodColor.b, 0.35f)
+                        : new Color(0.5f, 0.5f, 0.5f, 0.08f);
+                    Handles.DrawWireCube(center, new Vector3(rs, rs * 0.5f, rs));
+                }
             }
         }
 
@@ -173,8 +179,10 @@ public class VoxelWorldEditor : Editor
         DrawLegendEntry(new Rect(14, 66, 210, 16), new Color(1f, 0.2f, 0.2f),  "LOD 0 culled");
         for (int lod = 1; lod <= world.lodLevels; lod++)
         {
-            var col = Color.HSVToRGB(0.08f + lod * 0.1f, 0.8f, 0.9f);
-            DrawLegendEntry(new Rect(14, 66 + lod * 18, 210, 16), col, $"Region LOD {lod} (step {4 << (lod-1)})");
+            var col   = Color.HSVToRGB(0.08f + lod * 0.1f, 0.8f, 0.9f);
+            int hSize = 1 << lod;
+            DrawLegendEntry(new Rect(14, 66 + lod * 18, 210, 16), col,
+                $"Region LOD {lod} ({hSize}×{hSize} chunks, step {hSize})");
         }
         Handles.EndGUI();
     }

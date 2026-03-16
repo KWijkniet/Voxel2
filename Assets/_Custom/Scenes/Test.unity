@@ -323,7 +323,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VoxelWorld
   viewDistance: 16
-  verticalChunks: 3
+  verticalChunks: 8
   player: {fileID: 1120276404}
   seaLevel: 20
   baseHeight: 2

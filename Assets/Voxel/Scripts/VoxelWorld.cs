@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
@@ -9,17 +10,17 @@ using Unity.Jobs;
 using Unity.Mathematics;
 
 /// <summary>
-/// Two-tier LOD rendering:
+/// Variable-size LOD rendering:
 ///
-///   LOD 0 (within viewDistance):
+///   LOD 0 (within AlignedViewDistance):
 ///     Individual 16³ chunk meshes, full-detail. Drawn via Graphics.DrawMesh — no GameObjects.
 ///
-///   LOD 1+ (beyond viewDistance, within MaxRadius):
-///     4×vc×4 chunk groups (Regions) rendered as ONE mesh per group via Graphics.DrawMesh.
-///     Step = 4 voxels/cell at LOD 1, 8 at LOD 2, 16 at LOD 3.
-///     Reduces draw calls from ~4096 to ~256 at the outer ring.
+///   LOD L (ring L, beyond LOD L-1):
+///     Regions of (1&lt;&lt;L)×(1&lt;&lt;L) chunks, sampled at step (1&lt;&lt;L) voxels/cell.
+///     Every LOD mesh always has ~16×16 XZ cells → constant GPU cost per mesh.
+///     e.g. LOD 1 = 2×2 chunks / step 2, LOD 2 = 4×4 / step 4, LOD 3 = 8×8 / step 8.
 ///
-/// Example: viewDistance=8, lodLevels=2 → 8→16→32 chunk radii = 512 m max.
+/// Example: viewDistance=8, lodLevels=3 → 8→16→32→64 chunk radii = 1024 m max.
 /// </summary>
 public class VoxelWorld : MonoBehaviour
 {
@@ -81,14 +82,14 @@ public class VoxelWorld : MonoBehaviour
     // ── Derived ───────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// viewDistance rounded up to the nearest RegionData.HSize (4) multiple.
-    /// Ensures the LOD 0 / region boundary always falls on a region edge,
-    /// preventing a region mesh from overlapping with individual chunk GOs.
-    /// e.g. viewDistance=6 → AlignedViewDistance=8, viewDistance=8 → 8.
+    /// viewDistance rounded up to the nearest (1&lt;&lt;lodLevels) multiple.
+    /// Ensures all LOD zone boundaries land exactly on a region edge for every level,
+    /// so no region ever straddles the LOD 0 / LOD 1 boundary.
+    /// e.g. lodLevels=2 → snap=4: viewDistance=6 → 8.  lodLevels=3 → snap=8: vd=6 → 8.
     /// </summary>
     public int AlignedViewDistance
     {
-        get { int h = RegionData.HSize; return ((viewDistance + h - 1) / h) * h; }
+        get { int snap = 1 << Mathf.Max(1, lodLevels); return ((viewDistance + snap - 1) / snap) * snap; }
     }
 
     private int MaxRadius => AlignedViewDistance * (1 << lodLevels);
@@ -103,10 +104,10 @@ public class VoxelWorld : MonoBehaviour
 
     private readonly struct ChunkBuildResult
     {
-        public readonly Vector3Int   Coord;
-        public readonly PaletteChunk Chunk;
-        public readonly MeshData     MeshData; // null = data-only (for region use)
-        public ChunkBuildResult(Vector3Int c, PaletteChunk ch, MeshData m)
+        public readonly Vector3Int       Coord;
+        public readonly PaletteChunk     Chunk;
+        public readonly WritableMeshData MeshData; // null = data-only (for region use)
+        public ChunkBuildResult(Vector3Int c, PaletteChunk ch, WritableMeshData m)
         { Coord = c; Chunk = ch; MeshData = m; }
     }
 
@@ -126,17 +127,15 @@ public class VoxelWorld : MonoBehaviour
 
     private readonly Dictionary<Vector3Int, RegionData>  _regions       = new();
     private readonly Dictionary<Vector3Int, Mesh>         _regionMeshes  = new();
-    private readonly Dictionary<Vector3Int, int>          _regionStep    = new();
     private readonly HashSet<Vector3Int>                  _desiredRegions   = new();
     private readonly HashSet<Vector3Int>                  _regionInFlight   = new();
     private readonly ConcurrentQueue<RegionBuildResult>   _regionReadyQueue = new();
 
     private readonly struct RegionBuildResult
     {
-        public readonly Vector3Int RegionCoord;
-        public readonly MeshData   MeshData;
-        public readonly int        Step;
-        public RegionBuildResult(Vector3Int r, MeshData m, int s) { RegionCoord = r; MeshData = m; Step = s; }
+        public readonly Vector3Int       RegionCoord;
+        public readonly WritableMeshData MeshData;
+        public RegionBuildResult(Vector3Int r, WritableMeshData m) { RegionCoord = r; MeshData = m; }
     }
 
     private SemaphoreSlim _semaphore;
@@ -171,6 +170,12 @@ public class VoxelWorld : MonoBehaviour
         _semaphore = new SemaphoreSlim(maxConcurrentTasks, maxConcurrentTasks);
         if (chunkMaterial == null)
             chunkMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
+
+        // Pre-seed change-detection state so the first Update() doesn't see
+        // everything as "changed" and wastefully cancel all jobs we're about to start.
+        _lastLodLevels    = lodLevels;
+        _lastViewDistance = viewDistance;
+        _lastPlayerChunk  = WorldToChunkCoord(player != null ? player.position : Vector3.zero);
         UpdateLoadedChunks(true);
     }
 
@@ -245,6 +250,18 @@ public class VoxelWorld : MonoBehaviour
         DrawAllMeshes();
     }
 
+    private void OnGUI()
+    {
+        GUI.Label(new Rect(10, 10, 400, 160),
+            $"Desired chunks:  {_desiredCoords.Count}\n" +
+            $"In-flight:       {_inFlight.Count}\n" +
+            $"Pending Burst:   {_pendingGenerationJobs.Count}\n" +
+            $"Ready queue:     {_readyQueue.Count}\n" +
+            $"Chunk meshes:    {_chunkMeshes.Count}\n" +
+            $"Player chunk:    {_lastPlayerChunk}\n" +
+            $"ViewDist (aln):  {AlignedViewDistance}");
+    }
+
     // ── Change detection ──────────────────────────────────────────────────────
 
     private Vector3Int _lastPlayerChunk   = new Vector3Int(int.MaxValue, 0, 0);
@@ -293,38 +310,33 @@ public class VoxelWorld : MonoBehaviour
                     _desiredCoords.Add(new Vector3Int(ax, y, az));
             }
 
-            // ── Pass 2: LOD 1+ zone — iterate region coords directly ──────────────
-            // Iterates (2*maxRegionR+1)² regions instead of (2*maxR+1)² chunk offsets,
-            // giving ~7–11× fewer iterations. RegionContainsLod0Chunk is now called once
-            // per region (boundary detection) rather than once per chunk offset.
-            int h            = RegionData.HSize;
-            int playerRegionX = Mathf.FloorToInt(_lastPlayerChunk.x / (float)h);
-            int playerRegionZ = Mathf.FloorToInt(_lastPlayerChunk.z / (float)h);
-            int maxRegionR    = maxR / h + 1; // +1 to cover partial regions at the boundary
-
-            for (int rx = -maxRegionR; rx <= maxRegionR; rx++)
-            for (int rz = -maxRegionR; rz <= maxRegionR; rz++)
+            // ── Pass 2: LOD 1+ zones — one ring per LOD level ────────────────────
+            // At LOD level L: regions are (1<<L)×(1<<L) chunks, covering chunk Chebyshev
+            // distance [vd*(1<<(L-1)), vd*(1<<L)). AlignedViewDistance is a multiple of
+            // (1<<lodLevels) so all zone boundaries land exactly on region edges —
+            // no region ever straddles the LOD 0/1 boundary (no stitching needed).
+            for (int lod = 1; lod <= lodLevels; lod++)
             {
-                var regionCoord = new Vector3Int(playerRegionX + rx, 0, playerRegionZ + rz);
-                var baseChunk   = RegionBaseChunkCoord(regionCoord);
+                int hSize       = 1 << lod;
+                int innerRadius = vd * (1 << (lod - 1));
+                int outerRadius = vd * (1 << lod);
+                int playerRX    = Mathf.FloorToInt(_lastPlayerChunk.x / (float)hSize);
+                int playerRZ    = Mathf.FloorToInt(_lastPlayerChunk.z / (float)hSize);
+                int maxRegionR  = outerRadius / hSize + 1;
 
-                // Exclude regions whose nearest chunk exceeds MaxRadius.
-                int nearestX = Mathf.Clamp(_lastPlayerChunk.x, baseChunk.x, baseChunk.x + h - 1);
-                int nearestZ = Mathf.Clamp(_lastPlayerChunk.z, baseChunk.z, baseChunk.z + h - 1);
-                if (Mathf.Max(Mathf.Abs(nearestX - _lastPlayerChunk.x),
-                              Mathf.Abs(nearestZ - _lastPlayerChunk.z)) > maxR) continue;
+                for (int rx = -maxRegionR; rx <= maxRegionR; rx++)
+                for (int rz = -maxRegionR; rz <= maxRegionR; rz++)
+                {
+                    var regionCoord = new Vector3Int(playerRX + rx, lod, playerRZ + rz);
+                    var baseChunk   = RegionBaseChunkCoord(regionCoord);
+                    int nearestX    = Mathf.Clamp(_lastPlayerChunk.x, baseChunk.x, baseChunk.x + hSize - 1);
+                    int nearestZ    = Mathf.Clamp(_lastPlayerChunk.z, baseChunk.z, baseChunk.z + hSize - 1);
+                    int chebDist    = Mathf.Max(Mathf.Abs(nearestX - _lastPlayerChunk.x),
+                                                Mathf.Abs(nearestZ - _lastPlayerChunk.z));
 
-                if (RegionContainsLod0Chunk(regionCoord))
-                {
-                    // Boundary region: render its chunks as individual LOD 0 GOs to
-                    // prevent overlap with the adjacent region mesh.
-                    for (int lcx = 0; lcx < h; lcx++)
-                    for (int lcy = 0; lcy < verticalChunks; lcy++)
-                    for (int lcz = 0; lcz < h; lcz++)
-                        _desiredCoords.Add(new Vector3Int(baseChunk.x + lcx, lcy, baseChunk.z + lcz));
-                }
-                else
-                {
+                    if (chebDist >= outerRadius) continue; // beyond this LOD's outer edge
+                    if (chebDist <  innerRadius) continue; // inner edge — closer LOD covers it
+
                     _desiredRegions.Add(regionCoord);
                 }
             }
@@ -389,13 +401,10 @@ public class VoxelWorld : MonoBehaviour
         var regionsToProcess = _scratchRegionsToProc;
         foreach (var regionCoord in _desiredRegions)
         {
-            // Skip if already rendered at correct step or being built
+            // Step is invariant for a given regionCoord (1 << regionCoord.y),
+            // so any existing mesh is already at the correct step.
             if (_regionInFlight.Contains(regionCoord)) continue;
-            if (_regionMeshes.ContainsKey(regionCoord))
-            {
-                int wantedStep = GetRegionStep(regionCoord);
-                if (_regionStep.TryGetValue(regionCoord, out int cur) && cur == wantedStep) continue;
-            }
+            if (_regionMeshes.ContainsKey(regionCoord)) continue;
 
             regionsToProcess.Add(regionCoord);
         }
@@ -414,33 +423,28 @@ public class VoxelWorld : MonoBehaviour
 
         foreach (var regionCoord in regionsToProcess)
         {
-            int wantedStep = GetRegionStep(regionCoord);
-
-            // Re-mesh if LOD step changed
-            if (_regionMeshes.ContainsKey(regionCoord))
-                UnloadRegion(regionCoord);
+            int hSize = 1 << regionCoord.y; // chunks per region side at this LOD level
 
             if (!_regions.TryGetValue(regionCoord, out var region))
             {
-                // First visit: create and immediately feed all already-available chunk data.
-                region = new RegionData(verticalChunks);
+                // First visit: create region and immediately feed all already-available chunk data.
+                region = new RegionData(verticalChunks, hSize);
                 _regions[regionCoord] = region;
             }
             else if (regionDataSubmitted >= regionDataBudget)
             {
-                // Return visit with no budget: skip the 48-slot inner loop.
+                // Return visit with no budget: skip the inner chunk loop.
                 // TryFeedChunkIntoRegion (called from ApplyReadyChunks) handles feeding as
                 // data tasks complete, and triggers RequestRegionMesh when the region is full.
-                // Cancelled chunk slots will be re-requested next time budget is available.
-                if (region.IsComplete) RequestRegionMesh(regionCoord, region, wantedStep);
+                if (region.IsComplete) RequestRegionMesh(regionCoord, region);
                 continue;
             }
 
             // Feed already-available chunk data; request the rest (within budget)
             var baseChunk = RegionBaseChunkCoord(regionCoord);
-            for (int lcx = 0; lcx < RegionData.HSize; lcx++)
+            for (int lcx = 0; lcx < hSize; lcx++)
             for (int lcy = 0; lcy < verticalChunks; lcy++)
-            for (int lcz = 0; lcz < RegionData.HSize; lcz++)
+            for (int lcz = 0; lcz < hSize; lcz++)
             {
                 if (region.HasChunk(lcx, lcy, lcz)) continue;
                 var chunkCoord = new Vector3Int(baseChunk.x + lcx, lcy, baseChunk.z + lcz);
@@ -454,7 +458,7 @@ public class VoxelWorld : MonoBehaviour
             }
 
             if (region.IsComplete)
-                RequestRegionMesh(regionCoord, region, wantedStep);
+                RequestRegionMesh(regionCoord, region);
         }
 
         // If either budget was fully spent, there are likely more items waiting.
@@ -532,15 +536,26 @@ public class VoxelWorld : MonoBehaviour
             _inFlight.Remove(result.Coord);
             _chunks[result.Coord] = result.Chunk;
 
-            if (result.MeshData != null)
+            // LOD 0 mesh — drawn via Graphics.DrawMesh each frame.
+            // Store null as a sentinel for empty chunks (no visible faces) so they are
+            // not re-requested on every UpdateLoadedChunks call.  DrawAllMeshes already
+            // skips null entries.  Coords NOT in _desiredCoords are discarded outright.
+            if (_desiredCoords.Contains(result.Coord))
             {
-                // LOD 0 mesh (no GameObject — drawn via Graphics.DrawMesh each frame)
-                if (!_chunkMeshes.ContainsKey(result.Coord) && _desiredCoords.Contains(result.Coord))
+                if (!_chunkMeshes.ContainsKey(result.Coord))
                 {
-                    var mesh = ChunkRenderer.CreateMesh(result.MeshData);
-                    if (mesh != null) _chunkMeshes[result.Coord] = mesh;
+                    var mesh = result.MeshData != null ? ChunkRenderer.CreateMesh(result.MeshData) : null;
+                    _chunkMeshes[result.Coord] = mesh; // null = empty chunk sentinel
                     anyAdded = true;
                 }
+                else
+                {
+                    result.MeshData?.Discard();
+                }
+            }
+            else
+            {
+                result.MeshData?.Discard();
             }
 
             // Always feed this chunk's data into its region — boundary chunks (at exactly
@@ -610,11 +625,11 @@ public class VoxelWorld : MonoBehaviour
 
             tasksBudget--;
 
-            // Copy NativeArray to managed byte[] on the main thread (fast memcpy of 4096 bytes),
-            // then dispose the NativeArray immediately to free unmanaged memory.
-            // BuildPaletteChunkFromBlocks runs on a background thread so the main thread
-            // is not blocked by 4096 SetBlock calls × N completed jobs per frame.
-            var blocksCopy = pj.Blocks.ToArray();
+            // Rent a pooled byte[4096] from ArrayPool to avoid a managed allocation per job.
+            // CopyTo is equivalent to ToArray() but writes into the pre-existing buffer.
+            // Dispose NativeArray immediately to free unmanaged memory.
+            var blocksCopy = ArrayPool<byte>.Shared.Rent(PaletteChunk.Size * PaletteChunk.Size * PaletteChunk.Size);
+            pj.Blocks.CopyTo(blocksCopy);
             pj.Blocks.Dispose();
 
             // _inFlight cleanup is intentionally deferred to ApplyReadyChunks so the coord
@@ -632,7 +647,8 @@ public class VoxelWorld : MonoBehaviour
                         var chunk = BuildPaletteChunkFromBlocks(dataBlocks);
                         _readyQueue.Enqueue(new ChunkBuildResult(dataCoord, chunk, null));
                     }
-                    catch { _cancelledCoords.Enqueue(dataCoord); }
+                    catch (Exception e) { UnityEngine.Debug.LogError($"[VoxelWorld] Data build {dataCoord}: {e.Message}"); _cancelledCoords.Enqueue(dataCoord); }
+                    finally { ArrayPool<byte>.Shared.Return(dataBlocks); }
                 });
                 continue;
             }
@@ -644,9 +660,12 @@ public class VoxelWorld : MonoBehaviour
             var jobBlocks  = blocksCopy;
             Task.Run(async () =>
             {
+                // BuildPaletteChunkFromBlocks uses jobBlocks then returns it to the pool via finally.
+                // The finally always runs — even when catch does an early return — so one Return is enough.
                 PaletteChunk chunk;
                 try { chunk = BuildPaletteChunkFromBlocks(jobBlocks); }
-                catch { _cancelledCoords.Enqueue(coord); return; }
+                catch (Exception e) { UnityEngine.Debug.LogError($"[VoxelWorld] Palette build {coord}: {e.Message}"); _cancelledCoords.Enqueue(coord); return; }
+                finally { ArrayPool<byte>.Shared.Return(jobBlocks); }
 
                 try { await _semaphore.WaitAsync(token); }
                 catch (OperationCanceledException) { _cancelledCoords.Enqueue(coord); return; }
@@ -656,7 +675,7 @@ public class VoxelWorld : MonoBehaviour
                     var mesh = ChunkRenderer.BuildMeshData(chunk, neighbours, 0);
                     _readyQueue.Enqueue(new ChunkBuildResult(coord, chunk, mesh));
                 }
-                catch { _cancelledCoords.Enqueue(coord); }
+                catch (Exception e) { UnityEngine.Debug.LogError($"[VoxelWorld] Mesh build {coord}: {e.Message}"); _cancelledCoords.Enqueue(coord); }
                 finally { _semaphore.Release(); }
             });
         }
@@ -674,21 +693,23 @@ public class VoxelWorld : MonoBehaviour
         // Pre-seed all terrain types so GrowIfNeeded never repacks 4096 voxels mid-fill.
         chunk.SeedPalette(BlockType.Stone, BlockType.Dirt, BlockType.Grass,
                           BlockType.Sand,  BlockType.Water, BlockType.Snow);
-        int size  = PaletteChunk.Size;
-        for (int z = 0; z < size; z++)
-        for (int x = 0; x < size; x++)
-        for (int y = 0; y < size; y++)
-        {
-            byte b = blocks[x + y * size + z * size * size];
-            if (b != BlockType.Air)
-                chunk.SetBlock(x, y, z, b);
-        }
+        // BulkLoad is ~3× faster than 4096 individual SetBlock calls: skips the
+        // palette-registration branch and GrowIfNeeded check on every voxel.
+        chunk.BulkLoad(blocks);
         return chunk;
     }
 
     private void TryFeedChunkIntoRegion(Vector3Int coord, PaletteChunk chunk)
     {
-        var regionCoord = ChunkToRegionCoord(coord);
+        // Determine which LOD level zone this chunk sits in by Chebyshev distance.
+        int dist     = Mathf.Max(Mathf.Abs(coord.x - _lastPlayerChunk.x),
+                                  Mathf.Abs(coord.z - _lastPlayerChunk.z));
+        int lod      = 0;
+        int boundary = AlignedViewDistance;
+        while (lod < lodLevels && dist >= boundary) { lod++; boundary *= 2; }
+        if (lod == 0) return; // LOD 0 chunk — not part of any region
+
+        var regionCoord = ChunkToRegionCoord(coord, lod);
         if (!_regions.TryGetValue(regionCoord, out var region)) return;
 
         var local = coord - RegionBaseChunkCoord(regionCoord);
@@ -699,19 +720,23 @@ public class VoxelWorld : MonoBehaviour
         if (region.IsComplete && _desiredRegions.Contains(regionCoord)
             && !_regionInFlight.Contains(regionCoord)
             && !_regionMeshes.ContainsKey(regionCoord))
-            RequestRegionMesh(regionCoord, region, GetRegionStep(regionCoord));
+            RequestRegionMesh(regionCoord, region);
     }
 
     // ── LOD 1+ region tasks ───────────────────────────────────────────────────
 
-    private void RequestRegionMesh(Vector3Int regionCoord, RegionData region, int step)
+    private void RequestRegionMesh(Vector3Int regionCoord, RegionData region)
     {
         _regionInFlight.Add(regionCoord);
+        int step = 1 << regionCoord.y; // step is invariant: 2/4/8 for LOD 1/2/3
+
+        // Only horizontal neighbours — ±X and ±Z. Vertical (±Y) entries stay null since
+        // regions span the full world height. Note: adding dirs[2/3] would change the lod
+        // component of the coord, returning a different-level region which is not a neighbour.
         var neighbours = new RegionData[6];
         var dirs = ChunkRenderer.RegionNeighbourDirs;
         neighbours[0] = GetRegion(regionCoord + dirs[0]);
         neighbours[1] = GetRegion(regionCoord + dirs[1]);
-        // [2] and [3] (±Y) stay null — regions span full height
         neighbours[4] = GetRegion(regionCoord + dirs[4]);
         neighbours[5] = GetRegion(regionCoord + dirs[5]);
 
@@ -729,7 +754,7 @@ public class VoxelWorld : MonoBehaviour
             try
             {
                 var mesh = ChunkRenderer.BuildRegionMeshData(region, neighbours, step);
-                _regionReadyQueue.Enqueue(new RegionBuildResult(regionCoord, mesh, step));
+                _regionReadyQueue.Enqueue(new RegionBuildResult(regionCoord, mesh));
             }
             finally { _semaphore.Release(); }
         });
@@ -746,10 +771,13 @@ public class VoxelWorld : MonoBehaviour
             if (!_regionMeshes.ContainsKey(result.RegionCoord)
                 && _desiredRegions.Contains(result.RegionCoord))
             {
-                var mesh = ChunkRenderer.CreateMesh(result.MeshData);
-                if (mesh != null) _regionMeshes[result.RegionCoord] = mesh;
-                _regionStep[result.RegionCoord] = result.Step;
+                var mesh = ChunkRenderer.CreateMesh(result.MeshData); // O(1) pointer handoff
+                _regionMeshes[result.RegionCoord] = mesh; // null = empty region sentinel
                 anyAdded = true;
+            }
+            else
+            {
+                result.MeshData?.Discard(); // region no longer desired — free unmanaged memory
             }
 
             applied++;
@@ -765,7 +793,6 @@ public class VoxelWorld : MonoBehaviour
     private void UnloadRegion(Vector3Int r)
     {
         if (_regionMeshes.TryGetValue(r, out var mesh)) { Destroy(mesh); _regionMeshes.Remove(r); }
-        _regionStep.Remove(r);
     }
 
     // ── Draw meshes ───────────────────────────────────────────────────────────
@@ -884,21 +911,35 @@ public class VoxelWorld : MonoBehaviour
         return new Vector3Int(Mathf.FloorToInt(p.x / s), 0, Mathf.FloorToInt(p.z / s));
     }
 
-    private static Vector3Int ChunkToRegionCoord(Vector3Int c) =>
-        new Vector3Int(Mathf.FloorToInt(c.x / (float)RegionData.HSize), 0,
-                       Mathf.FloorToInt(c.z / (float)RegionData.HSize));
+    /// <summary>
+    /// Maps a chunk coord to the region coord at the given LOD level.
+    /// LOD level is stored in regionCoord.y so all levels share the same dictionaries.
+    /// </summary>
+    private static Vector3Int ChunkToRegionCoord(Vector3Int chunk, int lodLevel)
+    {
+        int size = 1 << lodLevel;
+        return new Vector3Int(
+            Mathf.FloorToInt(chunk.x / (float)size),
+            lodLevel,
+            Mathf.FloorToInt(chunk.z / (float)size));
+    }
 
-    private static Vector3Int RegionBaseChunkCoord(Vector3Int r) =>
-        new Vector3Int(r.x * RegionData.HSize, 0, r.z * RegionData.HSize);
+    /// <summary>Returns the minimum-corner chunk coord of a region (uses regionCoord.y as LOD level).</summary>
+    private static Vector3Int RegionBaseChunkCoord(Vector3Int regionCoord)
+    {
+        int size = 1 << regionCoord.y;
+        return new Vector3Int(regionCoord.x * size, 0, regionCoord.z * size);
+    }
 
     private static Vector3 ChunkToWorldPos(Vector3Int c)
     {
         float s = PaletteChunk.Size; return new Vector3(c.x * s, c.y * s, c.z * s);
     }
 
-    private static Vector3 RegionWorldPos(Vector3Int r)
+    private static Vector3 RegionWorldPos(Vector3Int regionCoord)
     {
-        float s = PaletteChunk.Size * RegionData.HSize; return new Vector3(r.x * s, 0, r.z * s);
+        float s = PaletteChunk.Size * (1 << regionCoord.y);
+        return new Vector3(regionCoord.x * s, 0, regionCoord.z * s);
     }
 
     private static Vector3 ChunkCenterWorld(Vector3Int c)
@@ -907,47 +948,19 @@ public class VoxelWorld : MonoBehaviour
         return new Vector3(c.x * s + s * 0.5f, c.y * s + s * 0.5f, c.z * s + s * 0.5f);
     }
 
-    private static Vector3 RegionCenterWorld(Vector3Int r)
+    private static Vector3 RegionCenterWorld(Vector3Int regionCoord)
     {
-        float hs = PaletteChunk.Size * RegionData.HSize;
-        return new Vector3(r.x * hs + hs * 0.5f, 0, r.z * hs + hs * 0.5f);
+        float s = PaletteChunk.Size * (1 << regionCoord.y);
+        return new Vector3(regionCoord.x * s + s * 0.5f, 0, regionCoord.z * s + s * 0.5f);
     }
 
     private static Bounds ChunkBounds(Vector3Int c) =>
         new Bounds(ChunkCenterWorld(c), Vector3.one * PaletteChunk.Size);
 
-    private static Bounds RegionBounds(Vector3Int r)
+    private static Bounds RegionBounds(Vector3Int regionCoord)
     {
-        float hs = PaletteChunk.Size * RegionData.HSize;
-        return new Bounds(RegionCenterWorld(r), new Vector3(hs, hs, hs));
-    }
-
-    /// <summary>
-    /// Returns true if the region's nearest chunk to the player is within the LOD 0 zone.
-    /// Such regions straddle the LOD boundary and must be rendered as individual LOD 0
-    /// chunks rather than a single region mesh, to avoid overlap with adjacent LOD 0 chunks.
-    /// </summary>
-    private bool RegionContainsLod0Chunk(Vector3Int regionCoord)
-    {
-        int h  = RegionData.HSize;
-        int px = _lastPlayerChunk.x, pz = _lastPlayerChunk.z;
-        int nx = Mathf.Clamp(px, regionCoord.x * h, regionCoord.x * h + h - 1);
-        int nz = Mathf.Clamp(pz, regionCoord.z * h, regionCoord.z * h + h - 1);
-        return Mathf.Max(Mathf.Abs(nx - px), Mathf.Abs(nz - pz)) < AlignedViewDistance;
-    }
-
-    private int GetRegionStep(Vector3Int regionCoord)
-    {
-        var baseChunk = RegionBaseChunkCoord(regionCoord);
-        int dist = Mathf.Max(Mathf.Abs(baseChunk.x - _lastPlayerChunk.x),
-                             Mathf.Abs(baseChunk.z - _lastPlayerChunk.z));
-        int radius = AlignedViewDistance; int step = 4;
-        for (int lod = 1; lod <= lodLevels; lod++)
-        {
-            if (dist <= radius * 2) return step;
-            radius *= 2; step *= 2;
-        }
-        return step;
+        float s = PaletteChunk.Size * (1 << regionCoord.y);
+        return new Bounds(RegionCenterWorld(regionCoord), new Vector3(s, s, s));
     }
 }
 

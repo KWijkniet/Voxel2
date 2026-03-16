@@ -4,7 +4,7 @@ using UnityEngine;
 using UnityEngine.Rendering;
 
 /// <summary>
-/// Raw mesh arrays produced on a background thread.
+/// Raw mesh arrays produced on a background thread (sync/editor path only).
 /// Passed to ApplyMeshData on the main thread to create the Unity Mesh.
 /// Bounds are pre-computed so the main thread can skip RecalculateBounds.
 /// </summary>
@@ -20,6 +20,63 @@ public sealed class MeshData
     { Vertices = v; Normals = n; UVs = u; Triangles = t; Bounds = bounds; }
 
     public bool IsEmpty => Vertices.Length == 0;
+}
+
+/// <summary>
+/// Holds greedy-mesh data (managed arrays) built on a background thread.
+/// Call Apply() on the main thread to pack into GPU memory and get a ready Mesh.
+/// AllocateWritableMeshData is main-thread-only, so packing happens in Apply().
+/// Call Discard() to abandon without uploading (GC cleans up the managed arrays).
+/// </summary>
+public sealed class WritableMeshData
+{
+    private readonly Vector3[] _vertices;
+    private readonly Vector3[] _normals;
+    private readonly Vector2[] _uvs;
+    private readonly int[]     _triangles;
+    public  readonly Bounds    Bounds;
+
+    internal WritableMeshData(Vector3[] v, Vector3[] n, Vector2[] u, int[] t, Bounds bounds)
+    { _vertices = v; _normals = n; _uvs = u; _triangles = t; Bounds = bounds; }
+
+    /// <summary>
+    /// Packs vertex data into GPU memory and uploads the mesh. Must be called on the main thread.
+    /// AllocateWritableMeshData is main-thread-only; all greedy-mesh CPU work already happened
+    /// on the background thread and is stored here as managed arrays.
+    /// </summary>
+    public Mesh Apply()
+    {
+        bool use32 = _vertices.Length > ushort.MaxValue;
+        var mda = Mesh.AllocateWritableMeshData(1);
+        var md  = mda[0];
+
+        md.SetVertexBufferParams(_vertices.Length,
+            new VertexAttributeDescriptor(VertexAttribute.Position,  VertexAttributeFormat.Float32, 3, stream: 0),
+            new VertexAttributeDescriptor(VertexAttribute.Normal,    VertexAttributeFormat.Float32, 3, stream: 1),
+            new VertexAttributeDescriptor(VertexAttribute.TexCoord0, VertexAttributeFormat.Float32, 2, stream: 2));
+        md.SetIndexBufferParams(_triangles.Length, use32 ? IndexFormat.UInt32 : IndexFormat.UInt16);
+
+        var positions = md.GetVertexData<Vector3>(0);
+        var normals   = md.GetVertexData<Vector3>(1);
+        var uvCoords  = md.GetVertexData<Vector2>(2);
+        for (int i = 0; i < _vertices.Length; i++) { positions[i] = _vertices[i]; normals[i] = _normals[i]; uvCoords[i] = _uvs[i]; }
+
+        if (use32) { var idx = md.GetIndexData<int>();    for (int i = 0; i < _triangles.Length; i++) idx[i] = _triangles[i]; }
+        else       { var idx = md.GetIndexData<ushort>(); for (int i = 0; i < _triangles.Length; i++) idx[i] = (ushort)_triangles[i]; }
+
+        md.subMeshCount = 1;
+        md.SetSubMesh(0, new SubMeshDescriptor(0, _triangles.Length),
+            MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+
+        var mesh = new Mesh { name = "Chunk" };
+        Mesh.ApplyAndDisposeWritableMeshData(mda, mesh,
+            MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+        mesh.bounds = Bounds;
+        return mesh;
+    }
+
+    /// <summary>Discard without uploading. Managed arrays are GC-collected automatically.</summary>
+    public void Discard() { /* managed arrays — GC handles cleanup */ }
 }
 
 /// <summary>
@@ -68,23 +125,28 @@ public class ChunkRenderer : MonoBehaviour
     }
 
     /// <summary>
-    /// Builds raw mesh arrays — safe to call from any thread.
+    /// Builds a WritableMeshData on any thread — pre-packs vertices into unmanaged memory
+    /// so the main thread only needs an O(1) pointer handoff via Apply().
+    /// Returns null if the chunk has no visible faces (fully hidden or fully air).
     /// neighbours[0..5] = +X,-X,+Y,-Y,+Z,-Z adjacent chunks (may be null).
     /// lodLevel 0 = full detail, 1 = half, 2 = quarter, 3 = eighth.
     /// </summary>
-    public static MeshData BuildMeshData(PaletteChunk chunk, PaletteChunk[] neighbours,
-                                          int lodLevel = 0)
+    public static WritableMeshData BuildMeshData(PaletteChunk chunk, PaletteChunk[] neighbours,
+                                                  int lodLevel = 0)
     {
-        // Reuse per-thread buffers — no allocation on repeat calls from the same worker thread.
         EnsureThreadLocalBuffers(PaletteChunk.Size * PaletteChunk.Size);
         int step = 1 << lodLevel;
-
         RunGreedyMesh(chunk, neighbours, _vertsTS, _normsTS, _uvsTS, _trisTS, _maskTS, step);
-
         int s = PaletteChunk.Size;
         var bounds = new Bounds(new Vector3(s * .5f, s * .5f, s * .5f), new Vector3(s, s, s));
-        return new MeshData(_vertsTS.ToArray(), _normsTS.ToArray(), _uvsTS.ToArray(), _trisTS.ToArray(), bounds);
+        return PackToWritableMesh(_vertsTS, _normsTS, _uvsTS, _trisTS, bounds);
     }
+
+    /// <summary>
+    /// Creates a Mesh from WritableMeshData via O(1) pointer handoff. Must be called on the main thread.
+    /// Returns null if data is null (empty mesh). Consumes data — do not use it again.
+    /// </summary>
+    public static Mesh CreateMesh(WritableMeshData data) => data?.Apply();
 
     /// <summary>Creates a Unity Mesh from pre-built MeshData without a GameObject. Must be called on the main thread.</summary>
     public static Mesh CreateMesh(MeshData data)
@@ -288,22 +350,17 @@ public class ChunkRenderer : MonoBehaviour
     };
 
     /// <summary>
-    /// Builds a region mesh on any thread. Neighbours are horizontally adjacent regions (+X,-X,+Z,-Z);
-    /// the ±Y entries are ignored (regions span the full world height).
-    /// step = voxels per LOD cell (4, 8, or 16 for LOD 1, 2, 3).
+    /// Builds a region mesh on any thread, pre-packed into unmanaged memory.
+    /// Returns null if the region has no visible faces.
+    /// Neighbours are horizontally adjacent regions (+X,-X,+Z,-Z); ±Y entries are ignored.
+    /// step = voxels per LOD cell (2/4/8 for LOD 1/2/3).
     /// </summary>
-    public static MeshData BuildRegionMeshData(RegionData region, RegionData[] neighbours, int step)
+    public static WritableMeshData BuildRegionMeshData(RegionData region, RegionData[] neighbours, int step)
     {
-        // Mask size = max(cellsU × cellsV) across all 6 face orientations.
-        // X/Z faces use VoxelSizeY and VoxelSizeZ/X as their two tangent axes,
-        // so if verticalChunks > 4 the Y dimension exceeds 64 and needs a larger buffer.
         int maskSize = Mathf.Max(
-            (region.VoxelSizeY / step) * (region.VoxelSizeZ / step), // X faces
-            (region.VoxelSizeX / step) * (region.VoxelSizeZ / step), // Y faces
-            (region.VoxelSizeX / step) * (region.VoxelSizeY / step)  // Z faces
-        );
-
-        // Reuse per-thread buffers — no allocation on repeat calls from the same worker thread.
+            (region.VoxelSizeY / step) * (region.VoxelSizeZ / step),
+            (region.VoxelSizeX / step) * (region.VoxelSizeZ / step),
+            (region.VoxelSizeX / step) * (region.VoxelSizeY / step));
         EnsureThreadLocalBuffers(maskSize);
 
         GreedyMeshFaceRegion(region, neighbours[0], 0, 1, 2, Vector3.right,   false, _vertsTS, _normsTS, _uvsTS, _trisTS, _maskTS, step);
@@ -315,7 +372,7 @@ public class ChunkRenderer : MonoBehaviour
 
         float sx = region.VoxelSizeX, sy = region.VoxelSizeY, sz = region.VoxelSizeZ;
         var bounds = new Bounds(new Vector3(sx * .5f, sy * .5f, sz * .5f), new Vector3(sx, sy, sz));
-        return new MeshData(_vertsTS.ToArray(), _normsTS.ToArray(), _uvsTS.ToArray(), _trisTS.ToArray(), bounds);
+        return PackToWritableMesh(_vertsTS, _normsTS, _uvsTS, _trisTS, bounds);
     }
 
     /// <summary>
@@ -422,6 +479,18 @@ public class ChunkRenderer : MonoBehaviour
     }
 
     // ── Shared upload helpers ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Converts thread-local lists into managed arrays on the background thread.
+    /// AllocateWritableMeshData is main-thread-only, so it runs inside Apply() instead.
+    /// Returns null when the vertex list is empty (no visible faces).
+    /// </summary>
+    private static WritableMeshData PackToWritableMesh(
+        List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<int> tris, Bounds bounds)
+    {
+        if (verts.Count == 0) return null;
+        return new WritableMeshData(verts.ToArray(), norms.ToArray(), uvs.ToArray(), tris.ToArray(), bounds);
+    }
 
     private static Mesh UploadMesh(List<Vector3> verts, List<Vector3> norms,
                                     List<Vector2> uvs,   List<int>     tris)

@@ -1,30 +1,30 @@
 /// <summary>
-/// Groups 4×verticalChunks×4 PaletteChunks into a single voxel-accessible region.
-/// The region covers 64×(vc*16)×64 voxels.
-/// Used as the rendering unit for LOD 1+ chunks — one draw call per region instead of 16+.
+/// Groups hSize×verticalChunks×hSize PaletteChunks into a single voxel-accessible region.
+/// hSize = 1&lt;&lt;lodLevel: 1 (LOD 0), 2 (LOD 1), 4 (LOD 2), 8 (LOD 3).
+/// Used as the rendering unit for LOD 1+ — one draw call per region instead of many.
 /// Thread-safe for reads once all chunks are set.
 /// </summary>
 public class RegionData
 {
-    public const int HSize = 4; // horizontal chunks per region side
-
+    public readonly int HSize;        // chunks per region side (1 << lodLevel)
     public readonly int VerticalChunks;
-    public readonly int VoxelSizeX;  // HSize * 16 = 64
-    public readonly int VoxelSizeY;  // VerticalChunks * 16
-    public readonly int VoxelSizeZ;  // HSize * 16 = 64
+    public readonly int VoxelSizeX;   // HSize * 16
+    public readonly int VoxelSizeY;   // VerticalChunks * 16
+    public readonly int VoxelSizeZ;   // HSize * 16
     public int TotalChunks { get; }
     public bool IsComplete => _readyCount >= TotalChunks;
 
     private readonly PaletteChunk[] _chunks; // [cx + cy*HSize + cz*HSize*vc]
     private int _readyCount;
 
-    public RegionData(int verticalChunks)
+    public RegionData(int verticalChunks, int hSize)
     {
+        HSize          = hSize;
         VerticalChunks = verticalChunks;
-        VoxelSizeX     = HSize * PaletteChunk.Size;
+        VoxelSizeX     = hSize * PaletteChunk.Size;
         VoxelSizeY     = verticalChunks * PaletteChunk.Size;
-        VoxelSizeZ     = HSize * PaletteChunk.Size;
-        TotalChunks    = HSize * verticalChunks * HSize;
+        VoxelSizeZ     = hSize * PaletteChunk.Size;
+        TotalChunks    = hSize * verticalChunks * hSize;
         _chunks        = new PaletteChunk[TotalChunks];
     }
 

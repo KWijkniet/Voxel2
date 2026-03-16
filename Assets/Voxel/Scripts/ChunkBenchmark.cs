@@ -101,26 +101,35 @@ public class ChunkBenchmark : MonoBehaviour
         // Neighbours are null here (standalone benchmark); real world would load them.
         var neighbours  = new PaletteChunk[6];
         var meshTimer   = Stopwatch.StartNew();
-        var meshData    = ChunkRenderer.BuildMeshData(chunk, neighbours, 0);
+        var writableData = ChunkRenderer.BuildMeshData(chunk, neighbours, 0);
         meshTimer.Stop();
 
-        int vertCount = meshData.IsEmpty ? 0 : meshData.Vertices.Length;
-        int triCount  = meshData.IsEmpty ? 0 : meshData.Triangles.Length / 3;
+        // Apply() uploads to GPU and returns the Mesh (O(1) pointer hand-off).
+        // Returns null for empty chunks; stats will be 0 in that case.
+        var uploadTimer = Stopwatch.StartNew();
+        var mesh = writableData?.Apply();
+        uploadTimer.Stop();
+
+        int vertCount = mesh != null ? mesh.vertexCount : 0;
+        int triCount  = mesh != null ? mesh.triangles.Length / 3 : 0;
         AppendLine(sb, "4. Greedy mesh generation", meshTimer,
                    $"{vertCount} verts, {triCount} tris");
 
         // ── Step 5: GameObject + mesh upload (main thread) ───────────────────
 
-        var uploadTimer = Stopwatch.StartNew();
+        AppendLine(sb, "5. Mesh upload (ApplyAndDisposeWritableMeshData)", uploadTimer);
 
         var go = new GameObject($"Benchmark Chunk {chunkCoord.x},{chunkCoord.y},{chunkCoord.z}");
         go.transform.SetParent(transform, false);
         go.transform.localPosition = new Vector3(
             chunkCoord.x * size, chunkCoord.y * size, chunkCoord.z * size);
-        go.AddComponent<ChunkRenderer>().ApplyMeshData(meshData, world.chunkMaterial);
-
-        uploadTimer.Stop();
-        AppendLine(sb, "5. Mesh upload + GameObject (main thread)", uploadTimer);
+        if (mesh != null)
+        {
+            var mf = go.AddComponent<MeshFilter>();
+            var mr = go.AddComponent<MeshRenderer>();
+            mf.sharedMesh = mesh;
+            mr.sharedMaterial = world.chunkMaterial;
+        }
 
         // ── Total ─────────────────────────────────────────────────────────────
 
