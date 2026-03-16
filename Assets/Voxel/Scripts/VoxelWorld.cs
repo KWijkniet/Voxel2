@@ -530,9 +530,10 @@ public class VoxelWorld : MonoBehaviour
     private bool ApplyReadyChunks()
     {
         int applied = 0;
-        bool anyAdded = false;
+        bool anyProcessed = false;
         while (applied < maxApplyPerFrame && _readyQueue.TryDequeue(out var result))
         {
+            anyProcessed = true; // any dequeue frees an _inFlight slot → may unblock pending requests
             _inFlight.Remove(result.Coord);
             _chunks[result.Coord] = result.Chunk;
 
@@ -546,7 +547,6 @@ public class VoxelWorld : MonoBehaviour
                 {
                     var mesh = result.MeshData != null ? ChunkRenderer.CreateMesh(result.MeshData) : null;
                     _chunkMeshes[result.Coord] = mesh; // null = empty chunk sentinel
-                    anyAdded = true;
                 }
                 else
                 {
@@ -565,7 +565,7 @@ public class VoxelWorld : MonoBehaviour
 
             applied++;
         }
-        return anyAdded;
+        return anyProcessed;
     }
 
     // ── Burst job completion ──────────────────────────────────────────────────
