@@ -330,11 +330,11 @@ MonoBehaviour:
   plainsHeight: 22
   mountainHeight: 80
   oceanDepth: 12
-  noiseScale: 0.004
+  noiseScale: 0.04
   octaves: 5
   persistence: 0.5
   lacunarity: 2
-  biomeScale: 0.008
+  biomeScale: 0.08
   warpStrength: 25
   warpScale: 0.005
   dirtDepth: 4
