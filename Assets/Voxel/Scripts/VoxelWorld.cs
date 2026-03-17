@@ -105,6 +105,10 @@ public class VoxelWorld : MonoBehaviour
     // VoxelChunk wraps a Persistent NativeArray<byte>. We own the lifetime.
     private readonly Dictionary<Vector3Int, VoxelChunk> _chunks      = new();
     private readonly Dictionary<Vector3Int, Mesh>        _chunkMeshes = new();
+    private readonly List<(Mesh mesh, Matrix4x4 trs)>    _chunkDrawList   = new();
+    private readonly List<(Mesh mesh, Matrix4x4 trs)>    _regionDrawList  = new();
+    private bool         _drawListDirty   = true;
+    private Matrix4x4    _cachedL2W       = Matrix4x4.zero;
     private readonly HashSet<Vector3Int>                  _desiredCoords  = new();
     private readonly HashSet<Vector3Int>                  _inFlight       = new();
     // Desired coords that are neither meshed nor in-flight. Kept in sync incrementally
@@ -198,9 +202,8 @@ public class VoxelWorld : MonoBehaviour
     private readonly List<Vector3Int> _scratchEvictR     = new();
     private readonly List<Vector3Int> _scratchRequestC   = new();
     private readonly List<Vector3Int> _scratchDataCoords = new(); // data-only region chunk requests
-    private readonly List<Vector3Int> _scratchRegions    = new();
+    private readonly List<(float dist, Vector3Int coord)> _scratchRegions   = new();
     private readonly List<(float dist, Vector3Int coord)> _scratchChunkSort = new();
-    private readonly Dictionary<Vector3Int, float>        _scratchRegionDist = new();
 
     // ── LOD 1+ storage (regions) ──────────────────────────────────────────────
 
@@ -478,20 +481,18 @@ public class VoxelWorld : MonoBehaviour
             }
 
             Profiler.BeginSample("LOD0.Extract");
-            foreach (var (_, coord) in _scratchChunkSort)
-                _scratchRequestC.Add(coord);
+            int extractCount = Mathf.Min(lod0Avail, _scratchChunkSort.Count);
+            for (int i = 0; i < extractCount; i++)
+                _scratchRequestC.Add(_scratchChunkSort[i].coord);
             Profiler.EndSample();
         }
         Profiler.EndSample();
 
-        int lod0Count  = Mathf.Min(lod0Avail, _scratchRequestC.Count);
+        int lod0Count  = _scratchRequestC.Count;
         lod0Submitted  = lod0Count;
 
         if (lod0Count > 0)
         {
-            // Trim to budget (list is already sorted closest-first, keep first lod0Count)
-            if (_scratchRequestC.Count > lod0Count)
-                _scratchRequestC.RemoveRange(lod0Count, _scratchRequestC.Count - lod0Count);
             Profiler.BeginSample("ULC.SubmitLOD0Batch");
             SubmitChunkBatch(_scratchRequestC, buildMesh: true);
             Profiler.EndSample();
@@ -503,13 +504,9 @@ public class VoxelWorld : MonoBehaviour
         foreach (var r in _desiredRegions)
         {
             if (_regionInFlight.Contains(r) || _regionMeshes.ContainsKey(r)) continue;
-            _scratchRegions.Add(r);
+            _scratchRegions.Add((RegionCenterWorld(r).sqrMagnitude_To(playerPos), r));
         }
-
-        _scratchRegionDist.Clear();
-        foreach (var r in _scratchRegions)
-            _scratchRegionDist[r] = RegionCenterWorld(r).sqrMagnitude_To(playerPos);
-        _scratchRegions.Sort((a, b) => _scratchRegionDist[a].CompareTo(_scratchRegionDist[b]));
+        _scratchRegions.Sort((a, b) => a.dist.CompareTo(b.dist));
         Profiler.EndSample();
 
         int regionBudget    = Mathf.Max(4, maxRequestsPerUpdate / 2);
@@ -519,7 +516,7 @@ public class VoxelWorld : MonoBehaviour
         _scratchDataCoords.Clear();
 
         Profiler.BeginSample("ULC.FillRegionData");
-        foreach (var regionCoord in _scratchRegions)
+        foreach (var (_, regionCoord) in _scratchRegions)
         {
             int hSize = 1 << regionCoord.y;
 
@@ -752,7 +749,7 @@ public class VoxelWorld : MonoBehaviour
 
             // Apply mesh (or null sentinel for empty/data-only)
             if (p.BuildMesh && _desiredCoords.Contains(p.Coord) && !_chunkMeshes.ContainsKey(p.Coord))
-                _chunkMeshes[p.Coord] = CreateMeshFromLists(ref p);
+            { _chunkMeshes[p.Coord] = CreateMeshFromLists(ref p); _drawListDirty = true; }
             else
                 DisposeMeshLists(ref p);
 
@@ -923,6 +920,7 @@ public class VoxelWorld : MonoBehaviour
                 && _desiredRegions.Contains(result.RegionCoord))
             {
                 _regionMeshes[result.RegionCoord] = MeshBuilder.CreateMesh(result.MeshData);
+                _drawListDirty = true;
                 anyAdded = true;
             }
             else
@@ -938,12 +936,12 @@ public class VoxelWorld : MonoBehaviour
 
     private void UnloadChunkMesh(Vector3Int coord)
     {
-        if (_chunkMeshes.TryGetValue(coord, out var mesh)) { Destroy(mesh); _chunkMeshes.Remove(coord); }
+        if (_chunkMeshes.TryGetValue(coord, out var mesh)) { Destroy(mesh); _chunkMeshes.Remove(coord); _drawListDirty = true; }
     }
 
     private void UnloadRegionMesh(Vector3Int r)
     {
-        if (_regionMeshes.TryGetValue(r, out var mesh)) { Destroy(mesh); _regionMeshes.Remove(r); }
+        if (_regionMeshes.TryGetValue(r, out var mesh)) { Destroy(mesh); _regionMeshes.Remove(r); _drawListDirty = true; }
     }
 
     private void DrawAllMeshes()
@@ -951,21 +949,27 @@ public class VoxelWorld : MonoBehaviour
         if (chunkMaterial == null) return;
         var localToWorld = transform.localToWorldMatrix;
 
-        foreach (var kvp in _chunkMeshes)
+        if (_drawListDirty || localToWorld != _cachedL2W)
         {
-            if (kvp.Value == null) continue;
-            Graphics.DrawMesh(kvp.Value,
-                              localToWorld * Matrix4x4.Translate(ChunkToWorldPos(kvp.Key)),
-                              chunkMaterial, gameObject.layer);
+            _cachedL2W = localToWorld;
+            _drawListDirty = false;
+
+            _chunkDrawList.Clear();
+            foreach (var kvp in _chunkMeshes)
+                if (kvp.Value != null)
+                    _chunkDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(ChunkToWorldPos(kvp.Key))));
+
+            _regionDrawList.Clear();
+            foreach (var kvp in _regionMeshes)
+                if (kvp.Value != null)
+                    _regionDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(RegionWorldPos(kvp.Key))));
         }
 
-        foreach (var kvp in _regionMeshes)
-        {
-            if (kvp.Value == null) continue;
-            Graphics.DrawMesh(kvp.Value,
-                              localToWorld * Matrix4x4.Translate(RegionWorldPos(kvp.Key)),
-                              chunkMaterial, gameObject.layer);
-        }
+        int layer = gameObject.layer;
+        foreach (var (mesh, trs) in _chunkDrawList)
+            Graphics.DrawMesh(mesh, trs, chunkMaterial, layer);
+        foreach (var (mesh, trs) in _regionDrawList)
+            Graphics.DrawMesh(mesh, trs, chunkMaterial, layer);
     }
 
     // ── Terrain settings ──────────────────────────────────────────────────────
