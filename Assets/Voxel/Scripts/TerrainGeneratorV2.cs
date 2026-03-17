@@ -155,13 +155,14 @@ public static class TerrainGeneratorV2
     {
         float wx = worldX, wz = worldZ;
 
-        // Sample five channels; per-channel X offset ensures decorrelated fields.
-        float c  = FBM(wx * s.CScale  + 100f, wz * s.CScale,  3) * 2f - 1f; // remap → [-1,1]
-        float e  = FBM(wx * s.EScale  + 200f, wz * s.EScale,  3);
-        float pv = RidgedFBM(wx * s.PVScale + 300f, wz * s.PVScale, s.PVOctaves);
-        float t  = FBM(wx * s.TScale  + 400f, wz * s.TScale,  2);
-        float h  = FBM(wx * s.HScale  + 500f, wz * s.HScale,  2);
-        float rv = FBM(wx * s.RiverMaskScale + 600f, wz * s.RiverMaskScale, 2);
+        // Non-integer x+z offsets per channel — avoids gradient-zero lattice points
+        // and keeps all channels decorrelated in both axes.
+        float c  = FBM(wx * s.CScale  + 73.3f,  wz * s.CScale  + 41.7f,  3) * 2f - 1f;
+        float e  = FBM(wx * s.EScale  + 151.9f, wz * s.EScale  + 83.1f,  3);
+        float pv = RidgedFBM(wx * s.PVScale + 237.5f, wz * s.PVScale + 129.3f, s.PVOctaves);
+        float t  = FBM(wx * s.TScale  + 317.7f, wz * s.TScale  + 189.5f, 2);
+        float h  = FBM(wx * s.HScale  + 419.3f, wz * s.HScale  + 261.7f, 2);
+        float rv = FBM(wx * s.RiverMaskScale + 533.1f, wz * s.RiverMaskScale + 337.9f, 2);
 
         // Biome weights (C, T, H only; E is terrain shape, not biome placement)
         float[] weights  = GetBiomeWeights(c, t, h, biomes);
@@ -221,9 +222,9 @@ public static class TerrainGeneratorV2
         BiomeDef[] biomes, in TerrainSettingsV2 s)
     {
         float wx = worldX, wz = worldZ;
-        float c = FBM(wx * s.CScale + 100f, wz * s.CScale, 3) * 2f - 1f;
-        float t = FBM(wx * s.TScale + 400f, wz * s.TScale, 2);
-        float h = FBM(wx * s.HScale + 500f, wz * s.HScale, 2);
+        float c = FBM(wx * s.CScale + 73.3f,  wz * s.CScale + 41.7f,  3) * 2f - 1f;
+        float t = FBM(wx * s.TScale + 317.7f, wz * s.TScale + 189.5f, 2);
+        float h = FBM(wx * s.HScale + 419.3f, wz * s.HScale + 261.7f, 2);
         var weights = GetBiomeWeights(c, t, h, biomes);
         return DominantBiomeIndex(weights);
     }

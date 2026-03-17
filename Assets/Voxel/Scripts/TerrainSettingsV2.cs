@@ -29,14 +29,14 @@ public struct TerrainSettingsV2
     {
         SeaLevel         = 20,
         MaxAmplitude     = 180f,
-        CScale           = 0.0003f,
-        EScale           = 0.001f,
-        PVScale          = 0.003f,
-        TScale           = 0.0008f,
-        HScale           = 0.0008f,
+        CScale           = 0.001f,   // ~1000 voxels per continental unit
+        EScale           = 0.003f,   // ~333 voxels per erosion unit
+        PVScale          = 0.005f,   // ~200 voxels per peak/valley unit
+        TScale           = 0.002f,   // ~500 voxels per temperature unit
+        HScale           = 0.002f,   // ~500 voxels per humidity unit
         PVOctaves        = 5,
         RiverThreshold   = 0.04f,
-        RiverMaskScale   = 0.0006f,
+        RiverMaskScale   = 0.002f,
         RiverCarveDepth  = 6,
         RiverErosionMin  = 0.35f,
         TerraceStep      = 0f,    // 0 = disabled; set to e.g. 8 to enable terrace cliffs

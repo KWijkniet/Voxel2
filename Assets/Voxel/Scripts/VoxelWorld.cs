@@ -101,17 +101,17 @@ public class VoxelWorld : MonoBehaviour
     public float v2MaxAmplitude = 180f;
 
     [Header("Terrain V2 — Frequencies")]
-    public float v2CScale    = 0.0003f;
-    public float v2EScale    = 0.001f;
-    public float v2PVScale   = 0.003f;
-    public float v2TScale    = 0.0008f;
-    public float v2HScale    = 0.0008f;
+    public float v2CScale    = 0.001f;
+    public float v2EScale    = 0.003f;
+    public float v2PVScale   = 0.005f;
+    public float v2TScale    = 0.002f;
+    public float v2HScale    = 0.002f;
     [Range(1, 8)]
     public int   v2PVOctaves = 5;
 
     [Header("Terrain V2 — Rivers")]
     public float v2RiverThreshold  = 0.04f;
-    public float v2RiverMaskScale  = 0.0006f;
+    public float v2RiverMaskScale  = 0.002f;
     public int   v2RiverCarveDepth = 6;
     public float v2RiverErosionMin = 0.35f;
 

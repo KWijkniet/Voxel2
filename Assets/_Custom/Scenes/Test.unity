@@ -348,14 +348,192 @@ MonoBehaviour:
   snowAltitude: 100
   desertSandDepth: 6
   tundraFrozenDepth: 3
-  chunkMaterial: {fileID: 2100000, guid: 915577a1428a176489884433fbc104de, type: 2}
-  transparentMaterial: {fileID: 2100000, guid: fa3e29056337cac488678e43f3d29113, type: 2}
+  chunkMaterial: {fileID: 0}
+  transparentMaterial: {fileID: 0}
   maxPipelinesInFlight: 24
   maxApplyPerFrame: 12
   maxRequestsPerUpdate: 16
   maxRegionTasks: 8
   terrainBatchSize: 8
   lodLevels: 1
+  useV2Generator: 1
+  v2SeaLevel: 20
+  v2MaxAmplitude: 180
+  v2CScale: 0.001
+  v2EScale: 0.003
+  v2PVScale: 0.005
+  v2TScale: 0.002
+  v2HScale: 0.002
+  v2PVOctaves: 5
+  v2RiverThreshold: 0.04
+  v2RiverMaskScale: 0.002
+  v2RiverCarveDepth: 6
+  v2RiverErosionMin: 0.35
+  v2TerraceStep: 0
+  v2TerraceErosionMin: 0.3
+  v2TerraceErosionMax: 0.6
+  v2CSplinePoints:
+  - {x: -1, y: -60}
+  - {x: -0.1, y: 0}
+  - {x: 0.2, y: 20}
+  - {x: 0.6, y: 50}
+  - {x: 1, y: 70}
+  v2ESplinePoints:
+  - {x: 0, y: 1}
+  - {x: 0.5, y: 0.3}
+  - {x: 0.8, y: 0.08}
+  - {x: 1, y: 0.03}
+  v2Biomes:
+  - MinC: -1
+    MaxC: -0.3
+    BlendC: 0.05
+    MinT: 0
+    MaxT: 1
+    BlendT: 0
+    MinH: 0
+    MaxH: 1
+    BlendH: 0
+    HeightBias: 0
+    SurfaceBlock: 4
+    SubSurfaceBlock: 4
+    SubSurfaceDepth: 2
+    DeepBlock: 1
+    SnowAltitude: -1
+  - MinC: -0.3
+    MaxC: -0.1
+    BlendC: 0.05
+    MinT: 0
+    MaxT: 0.25
+    BlendT: 0.05
+    MinH: 0
+    MaxH: 1
+    BlendH: 0
+    HeightBias: 0
+    SurfaceBlock: 9
+    SubSurfaceBlock: 10
+    SubSurfaceDepth: 4
+    DeepBlock: 1
+    SnowAltitude: -1
+  - MinC: -0.3
+    MaxC: -0.1
+    BlendC: 0.05
+    MinT: 0
+    MaxT: 1
+    BlendT: 0
+    MinH: 0
+    MaxH: 1
+    BlendH: 0
+    HeightBias: 0
+    SurfaceBlock: 4
+    SubSurfaceBlock: 1
+    SubSurfaceDepth: 3
+    DeepBlock: 1
+    SnowAltitude: -1
+  - MinC: -0.1
+    MaxC: 0.1
+    BlendC: 0.05
+    MinT: 0
+    MaxT: 1
+    BlendT: 0
+    MinH: 0
+    MaxH: 1
+    BlendH: 0
+    HeightBias: 0
+    SurfaceBlock: 4
+    SubSurfaceBlock: 7
+    SubSurfaceDepth: 4
+    DeepBlock: 1
+    SnowAltitude: -1
+  - MinC: 0.1
+    MaxC: 1
+    BlendC: 0.05
+    MinT: 0.3
+    MaxT: 0.7
+    BlendT: 0.05
+    MinH: 0.2
+    MaxH: 0.6
+    BlendH: 0.05
+    HeightBias: 0
+    SurfaceBlock: 3
+    SubSurfaceBlock: 2
+    SubSurfaceDepth: 3
+    DeepBlock: 1
+    SnowAltitude: 75
+  - MinC: 0.1
+    MaxC: 1
+    BlendC: 0.05
+    MinT: 0.3
+    MaxT: 0.7
+    BlendT: 0.05
+    MinH: 0.6
+    MaxH: 1
+    BlendH: 0.05
+    HeightBias: 0
+    SurfaceBlock: 3
+    SubSurfaceBlock: 2
+    SubSurfaceDepth: 4
+    DeepBlock: 1
+    SnowAltitude: 75
+  - MinC: 0.1
+    MaxC: 1
+    BlendC: 0.05
+    MinT: 0.7
+    MaxT: 1
+    BlendT: 0.05
+    MinH: 0
+    MaxH: 0.5
+    BlendH: 0.05
+    HeightBias: -5
+    SurfaceBlock: 4
+    SubSurfaceBlock: 7
+    SubSurfaceDepth: 6
+    DeepBlock: 1
+    SnowAltitude: -1
+  - MinC: 0.1
+    MaxC: 1
+    BlendC: 0.05
+    MinT: 0.2
+    MaxT: 0.45
+    BlendT: 0.05
+    MinH: 0.4
+    MaxH: 1
+    BlendH: 0.05
+    HeightBias: 0
+    SurfaceBlock: 6
+    SubSurfaceBlock: 8
+    SubSurfaceDepth: 3
+    DeepBlock: 1
+    SnowAltitude: -1
+  - MinC: 0.1
+    MaxC: 1
+    BlendC: 0.05
+    MinT: 0
+    MaxT: 0.25
+    BlendT: 0.05
+    MinH: 0
+    MaxH: 1
+    BlendH: 0
+    HeightBias: 0
+    SurfaceBlock: 6
+    SubSurfaceBlock: 8
+    SubSurfaceDepth: 3
+    DeepBlock: 1
+    SnowAltitude: -1
+  - MinC: 0.4
+    MaxC: 1
+    BlendC: 0.05
+    MinT: 0
+    MaxT: 1
+    BlendT: 0
+    MinH: 0
+    MaxH: 1
+    BlendH: 0
+    HeightBias: 0
+    SurfaceBlock: 1
+    SubSurfaceBlock: 1
+    SubSurfaceDepth: 10
+    DeepBlock: 1
+    SnowAltitude: 75
 --- !u!4 &989120344
 Transform:
   m_ObjectHideFlags: 0

@@ -91,7 +91,7 @@ public struct GenerateChunksBatchJobV2 : IJobParallelFor
 
             int   dom;
             float heightBias;
-            ComputeBiomeInfo(c, t, h, out dom, out heightBias);
+            ComputeBiomeInfo(wx, wz, c, t, h, out dom, out heightBias);
 
             float continentalOffset = SplineEval(CSpline, c);
             float erosionScale      = SplineEval(ESpline, e);
@@ -153,7 +153,7 @@ public struct GenerateChunksBatchJobV2 : IJobParallelFor
 
         int   dom;
         float heightBias;
-        ComputeBiomeInfo(c, t, h, out dom, out heightBias);
+        ComputeBiomeInfo(worldX, worldZ, c, t, h, out dom, out heightBias);
 
         float continentalOffset = SplineEval(CSpline, c);
         float erosionScale      = SplineEval(ESpline, e);
@@ -173,22 +173,22 @@ public struct GenerateChunksBatchJobV2 : IJobParallelFor
     // ── Channel samplers ─────────────────────────────────────────────────────
 
     private static float SampleC(int wx, int wz, TerrainSettingsV2 s)
-        => FBM(wx * s.CScale + 100f, wz * s.CScale, 3) * 2f - 1f; // remap → [-1,1]
+        => FBM(wx * s.CScale + 73.3f, wz * s.CScale + 41.7f, 3) * 2f - 1f; // remap → [-1,1]
 
     private static float SampleE(int wx, int wz, TerrainSettingsV2 s)
-        => FBM(wx * s.EScale + 200f, wz * s.EScale, 3);
+        => FBM(wx * s.EScale + 151.9f, wz * s.EScale + 83.1f, 3);
 
     private static float SamplePV(int wx, int wz, TerrainSettingsV2 s)
-        => RidgedFBM(wx * s.PVScale + 300f, wz * s.PVScale, s.PVOctaves);
+        => RidgedFBM(wx * s.PVScale + 237.5f, wz * s.PVScale + 129.3f, s.PVOctaves);
 
     private static float SampleT(int wx, int wz, TerrainSettingsV2 s)
-        => FBM(wx * s.TScale + 400f, wz * s.TScale, 2);
+        => FBM(wx * s.TScale + 317.7f, wz * s.TScale + 189.5f, 2);
 
     private static float SampleH(int wx, int wz, TerrainSettingsV2 s)
-        => FBM(wx * s.HScale + 500f, wz * s.HScale, 2);
+        => FBM(wx * s.HScale + 419.3f, wz * s.HScale + 261.7f, 2);
 
     private static float SampleRiver(int wx, int wz, TerrainSettingsV2 s)
-        => FBM(wx * s.RiverMaskScale + 600f, wz * s.RiverMaskScale, 2);
+        => FBM(wx * s.RiverMaskScale + 533.1f, wz * s.RiverMaskScale + 337.9f, 2);
 
     // ── Noise ─────────────────────────────────────────────────────────────────
 
@@ -244,22 +244,22 @@ public struct GenerateChunksBatchJobV2 : IJobParallelFor
 
     // ── Biome ─────────────────────────────────────────────────────────────────
 
-    private void ComputeBiomeInfo(float c, float t, float h,
+    private void ComputeBiomeInfo(int wx, int wz, float c, float t, float h,
                                   out int dominantBiome, out float heightBias)
     {
         dominantBiome = 0;
-        float dominantW = 0f;
-        float sumW      = 0f;
-        heightBias      = 0f;
+        float sumW  = 0f;
+        float bestW = 0f;
+        heightBias  = 0f;
 
-        // First pass: find sum and dominant
+        // First pass: sum weights, find dominant
         for (int b = 0; b < Biomes.Length; b++)
         {
             float w = AxisWeight(Biomes[b].MinC, Biomes[b].MaxC, Biomes[b].BlendC, c)
                     * AxisWeight(Biomes[b].MinT, Biomes[b].MaxT, Biomes[b].BlendT, t)
                     * AxisWeight(Biomes[b].MinH, Biomes[b].MaxH, Biomes[b].BlendH, h);
             sumW += w;
-            if (w > dominantW) { dominantW = w; dominantBiome = b; }
+            if (w > bestW) { bestW = w; dominantBiome = b; }
         }
 
         float invSum = sumW > 1e-5f ? 1f / sumW : 1f / math.max(Biomes.Length, 1);

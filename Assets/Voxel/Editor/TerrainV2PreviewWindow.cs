@@ -74,6 +74,10 @@ public class TerrainV2PreviewWindow : EditorWindow
 
     private void OnEnable()
     {
+        // Re-initialize after domain reload (Unity zeros non-serialized fields on recompile).
+        if (_settings.CScale == 0f)
+            _settings = TerrainSettingsV2.Default;
+
         _cSpline   = SplineUtils.DefaultContinentalnessSpline;
         _eSpline   = SplineUtils.DefaultErosionSpline;
         _biomes    = BiomeDef.CreateDefaults();
@@ -293,10 +297,8 @@ public class TerrainV2PreviewWindow : EditorWindow
         {
             string n = i < BiomeDef.DefaultNames.Length ? BiomeDef.DefaultNames[i] : $"Biome {i}";
             EditorGUILayout.BeginHorizontal();
-            var prevBg = GUI.backgroundColor;
-            GUI.backgroundColor = BiomeColors[i];
-            GUILayout.Box(GUIContent.none, GUILayout.Width(16), GUILayout.Height(16));
-            GUI.backgroundColor = prevBg;
+            var swatchRect = GUILayoutUtility.GetRect(16, 16, GUILayout.Width(16), GUILayout.Height(16));
+            EditorGUI.DrawRect(swatchRect, BiomeColors[i]);
             EditorGUILayout.LabelField($"{i}: {n}");
             EditorGUILayout.EndHorizontal();
         }
@@ -392,6 +394,10 @@ public class TerrainV2PreviewWindow : EditorWindow
                 }
             }
 
+            // Log center pixel for diagnostics
+            var center = samples[(res / 2) * res + res / 2];
+            Debug.Log($"[V2 Preview] Center pixel — C:{center.C:F3} E:{center.E:F3} PV:{center.PV:F3} T:{center.T:F3} H:{center.H:F3} | dominant:{center.DominantBiome} ({(center.DominantBiome < BiomeDef.DefaultNames.Length ? BiomeDef.DefaultNames[center.DominantBiome] : "?")}) | weights sum:{System.Linq.Enumerable.Sum(center.BiomeWeights):F4}");
+
             // Find height range for normalization
             _heightMin = float.MaxValue;
             _heightMax = float.MinValue;
@@ -425,10 +431,9 @@ public class TerrainV2PreviewWindow : EditorWindow
                 byte hv = ToByte((s.HeightFinal - _heightMin) / heightRange);
                 pxHeight[i] = new Color32(hv, hv, hv, 255);
 
-                // Biome — blended color
-                Color biomeCol = Color.black;
-                for (int b = 0; b < s.BiomeWeights.Length && b < BiomeColors.Length; b++)
-                    biomeCol += BiomeColors[b] * s.BiomeWeights[b];
+                // Biome — dominant biome solid color
+                Color biomeCol = s.DominantBiome >= 0 && s.DominantBiome < BiomeColors.Length
+                    ? BiomeColors[s.DominantBiome] : Color.magenta;
                 pxBiome[i] = ToColor32(biomeCol);
 
                 // C — grayscale, remapped [-1,1] → [0,1]
