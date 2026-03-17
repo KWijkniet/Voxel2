@@ -325,21 +325,29 @@ MonoBehaviour:
   viewDistance: 12
   verticalChunks: 12
   player: {fileID: 1120276404}
-  seaLevel: 20
-  baseHeight: 2
-  plainsHeight: 8
+  seaLevel: 15
+  baseHeight: 5
+  plainsHeight: 20
+  forestHeight: 25
   mountainHeight: 200
-  oceanDepth: 12
+  tundraHeight: 15
+  desertDuneHeight: 30
+  oceanDepth: 10
   noiseScale: 0.003
   octaves: 5
   persistence: 0.75
   lacunarity: 2
-  biomeScale: 0.003
+  tempScale: 0.003
+  humidityScale: 0.004
+  mountainBiomeScale: 0.003
+  mountainBiomeThreshold: 0.65
   warpStrength: 40
   warpScale: 0.005
   dirtDepth: 4
   sandBeachWidth: 3
   snowAltitude: 100
+  desertSandDepth: 6
+  tundraFrozenDepth: 3
   chunkMaterial: {fileID: 2100000, guid: 915577a1428a176489884433fbc104de, type: 2}
   maxPipelinesInFlight: 24
   maxApplyPerFrame: 12

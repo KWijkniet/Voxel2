@@ -17,61 +17,73 @@ public struct TerrainSettings
     public int seaLevel;
 
     // ── Height ranges ─────────────────────────────────────────────────────────
-    public int   baseHeight;      // minimum solid ground
-    public int   plainsHeight;    // max height above baseHeight in plains biome
-    public int   mountainHeight;  // max height above baseHeight in mountain biome
-    public int   oceanDepth;      // how far below seaLevel the ocean floor reaches
+    public int   baseHeight;       // minimum solid ground
+    public int   plainsHeight;     // max terrain amplitude in plains biome
+    public int   forestHeight;     // max terrain amplitude in forest biome
+    public int   mountainHeight;   // max terrain amplitude in mountain biome
+    public int   tundraHeight;     // max terrain amplitude in tundra biome
+    public int   desertDuneHeight; // max dune amplitude in desert biome
+    public int   oceanDepth;       // how far below seaLevel the ocean floor reaches
 
     // ── FBM ───────────────────────────────────────────────────────────────────
-    public float noiseScale;      // base frequency (smaller = larger features)
-    public int   octaves;         // detail layers
-    public float persistence;     // amplitude falloff per octave (0–1)
-    public float lacunarity;      // frequency growth per octave (>1)
+    public float noiseScale;       // base frequency (smaller = larger features)
+    public int   octaves;          // detail layers
+    public float persistence;      // amplitude falloff per octave (0–1)
+    public float lacunarity;       // frequency growth per octave (>1)
 
-    // ── Biome ─────────────────────────────────────────────────────────────────
-    public float biomeScale;      // frequency of biome transitions (very low)
+    // ── Biome axes ────────────────────────────────────────────────────────────
+    // Temperature (0 = cold/tundra, 1 = hot/desert) and humidity (0 = dry, 1 = wet).
+    // Desert and Tundra are at opposite ends of the temperature axis — never adjacent.
+    // Mountain is a separate override noise, independent of temperature/humidity.
+    public float tempScale;                // temperature noise frequency
+    public float humidityScale;            // humidity noise frequency
+    public float mountainBiomeScale;       // mountain override noise frequency
+    public float mountainBiomeThreshold;   // mountain noise above this → mountain biome
 
     // ── Domain warp ───────────────────────────────────────────────────────────
-    public float warpStrength;    // max coordinate displacement in voxels
-    public float warpScale;       // frequency of the warp noise
+    public float warpStrength;     // max coordinate displacement in voxels
+    public float warpScale;        // frequency of the warp noise
 
-    // ── Block layering ────────────────────────────────────────────────────────
-    public int dirtDepth;         // dirt layers below the surface
-    public int sandBeachWidth;    // surface height above seaLevel that stays sand
-    public int snowAltitude;      // surface height above which snow replaces grass
+    // ── Block layering ─────────────────────────────────────────────────────────
+    public int dirtDepth;          // dirt layers below surface (plains/forest/mountain)
+    public int sandBeachWidth;     // surface height above seaLevel that stays sandy beach
+    public int snowAltitude;       // height above which snow replaces grass on peaks
+    public int desertSandDepth;    // sand layers in desert before sandstone
+    public int tundraFrozenDepth;  // frozen dirt layers in tundra before stone
 }
 
 /// <summary>
-/// Pure-math terrain generator. All methods are static and thread-safe —
-/// safe to call from background Task threads.
+/// Pure-math terrain generator. All methods are static and thread-safe.
 ///
-/// Pipeline per column (worldX, worldZ):
-///   1. Domain warp   — distort coords to break noise regularity
-///   2. FBM           — multi-octave Perlin → normalised [0,1]
-///   3. Biome noise   — separate low-frequency noise → [0,1]
-///   4. Biome blend   — lerp between ocean / plains / hills / mountain curves
-///   5. Block select  — surface, depth, altitude → block type
+/// Biome system — two noise axes:
+///   Temperature (0=cold, 1=hot): Tundra → Plains/Forest → Desert
+///   Humidity    (0=dry,  1=wet): Plains → Forest (within temperate band)
+///   Mountain: separate override noise; when above threshold, overrides T/H biome.
+///
+/// Five land biomes: Plains, Forest, Desert, Tundra, Mountain.
+/// Height curves blend by weight; block rules use the dominant biome.
+/// Snow applies above snowAltitude in all non-desert biomes.
+/// Ocean forms naturally wherever blended height falls below seaLevel.
 /// </summary>
 public static class TerrainGenerator
 {
     // ── Surface height cache ──────────────────────────────────────────────────
-    // Avoids recomputing the expensive FBM+warp pipeline for the same (worldX, worldZ)
-    // when adjacent chunks load concurrently and share boundary column heights.
-    // Key = worldX << 32 | (uint)worldZ.  Only full-detail results are cached
-    // (low-detail may differ and are faster to recompute anyway).
-    // Call ClearSurfaceCache() when the player chunk changes so stale entries don't
-    // accumulate across large movements.
-
     private static readonly ConcurrentDictionary<long, int> _surfaceCache = new();
 
     public static void ClearSurfaceCache() => _surfaceCache.Clear();
+
+    // ── Biome IDs ─────────────────────────────────────────────────────────────
+    public const byte BiomePlains   = 0;
+    public const byte BiomeForest   = 1;
+    public const byte BiomeDesert   = 2;
+    public const byte BiomeTundra   = 3;
+    public const byte BiomeMountain = 4;
 
     // ── Public API ────────────────────────────────────────────────────────────
 
     /// <summary>
     /// Returns the surface height (in world voxels) at (worldX, worldZ).
-    /// lowDetail = true uses fewer noise octaves — safe for region backing chunks
-    /// that are only sampled every 4+ voxels. Saves ~40% of noise calls.
+    /// lowDetail = true uses fewer noise octaves for region backing chunks.
     /// </summary>
     public static int GetSurface(int worldX, int worldZ, in TerrainSettings s, bool lowDetail = false)
     {
@@ -79,8 +91,6 @@ public static class TerrainGenerator
         if (!lowDetail && _surfaceCache.TryGetValue(cacheKey, out int cached)) return cached;
 
         float wx = worldX, wz = worldZ;
-
-        // 1. Domain warp — one octave is enough for region-distance chunks
         if (s.warpStrength > 0f)
         {
             int warpOctaves = lowDetail ? 1 : 2;
@@ -90,25 +100,19 @@ public static class TerrainGenerator
             wz += (dZ - 0.5f) * s.warpStrength * 2f;
         }
 
-        // 2. FBM terrain noise → [0,1]
         int terrainOctaves = lowDetail ? Mathf.Max(2, s.octaves - 2) : s.octaves;
         float fbm = FBM(wx * s.noiseScale, wz * s.noiseScale, terrainOctaves, s.persistence, s.lacunarity);
 
-        // 3. Biome — two octaves sufficient for region-distance transitions
-        int biomeOctaves = lowDetail ? 2 : 3;
-        float biome = FBM(worldX * s.biomeScale + 100.3f, worldZ * s.biomeScale + 100.7f, biomeOctaves, 0.6f, 2f);
+        ComputeBiomeWeights(worldX, worldZ, s, lowDetail,
+            out float plainsW, out float forestW, out float desertW,
+            out float tundraW, out float mountainW);
 
-        // 4. Per-biome height curves
-        float oceanH  = s.seaLevel  - s.oceanDepth  + fbm * s.oceanDepth * 0.5f;
-        float plainsH = s.baseHeight + fbm * s.plainsHeight;
-        float hillsH  = s.baseHeight + fbm * (s.plainsHeight + s.mountainHeight) * 0.5f;
-        float mountH  = s.baseHeight + Mathf.Pow(fbm, 1.4f) * s.mountainHeight; // sharper peaks
-
-        float height;
-        if      (biome < 0.25f) height = Mathf.Lerp(oceanH,  plainsH, biome / 0.25f);
-        else if (biome < 0.50f) height = Mathf.Lerp(plainsH, hillsH,  (biome - 0.25f) / 0.25f);
-        else if (biome < 0.75f) height = Mathf.Lerp(hillsH,  mountH,  (biome - 0.50f) / 0.25f);
-        else                    height = mountH;
+        float height =
+            plainsW   * (s.baseHeight + fbm * s.plainsHeight) +
+            forestW   * (s.baseHeight + fbm * s.forestHeight) +
+            desertW   * (s.baseHeight + fbm * s.desertDuneHeight) +
+            tundraW   * (s.baseHeight + fbm * s.tundraHeight) +
+            mountainW * (s.baseHeight + Mathf.Pow(fbm, 1.4f) * s.mountainHeight);
 
         int result = Mathf.RoundToInt(height);
         if (!lowDetail) _surfaceCache.TryAdd(cacheKey, result);
@@ -121,23 +125,8 @@ public static class TerrainGenerator
     /// </summary>
     public static byte GetBlock(int worldX, int worldY, int worldZ, int surface, in TerrainSettings s)
     {
-        if (worldY > surface)
-            return worldY <= s.seaLevel ? BlockType.Water : BlockType.Air;
-
-        int  depth   = surface - worldY;           // 0 = surface voxel
-        bool nearSea = surface <= s.seaLevel + s.sandBeachWidth;
-
-        if (depth == 0)
-        {
-            if (nearSea)                    return BlockType.Sand;
-            if (worldY >= s.snowAltitude)   return BlockType.Snow;
-            return BlockType.Grass;
-        }
-
-        if (depth <= s.dirtDepth)
-            return nearSea ? BlockType.Sand : BlockType.Dirt;
-
-        return BlockType.Stone;
+        byte biome = GetDominantBiome(worldX, worldZ, s);
+        return GetBlockForBiome(worldX, worldY, surface, biome, s);
     }
 
     /// <summary>Convenience overload — computes surface internally (slower per-voxel).</summary>
@@ -146,10 +135,76 @@ public static class TerrainGenerator
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Fractal Brownian Motion — sums octaves of Perlin noise, normalised to [0,1].
-    /// Octave i is sampled with a per-octave offset to avoid lattice alignment.
-    /// </summary>
+    public static byte GetDominantBiome(int worldX, int worldZ, in TerrainSettings s)
+    {
+        ComputeBiomeWeights(worldX, worldZ, s, false,
+            out float plainsW, out float forestW, out float desertW,
+            out float tundraW, out float mountainW);
+
+        byte biome = BiomePlains;
+        float max = plainsW;
+        if (forestW   > max) { max = forestW;   biome = BiomeForest;   }
+        if (desertW   > max) { max = desertW;   biome = BiomeDesert;   }
+        if (tundraW   > max) { max = tundraW;   biome = BiomeTundra;   }
+        if (mountainW > max)                    biome = BiomeMountain;
+        return biome;
+    }
+
+    private static void ComputeBiomeWeights(int worldX, int worldZ, in TerrainSettings s,
+        bool lowDetail,
+        out float plainsW, out float forestW, out float desertW,
+        out float tundraW, out float mountainW)
+    {
+        int biomeOctaves = lowDetail ? 2 : 2; // biome noise is always low-frequency; 2 oct is enough
+
+        float temp    = FBM(worldX * s.tempScale    + 200f, worldZ * s.tempScale,    biomeOctaves, 0.5f, 2f);
+        float humid   = FBM(worldX * s.humidityScale +  50f, worldZ * s.humidityScale, biomeOctaves, 0.5f, 2f);
+        float mountN  = FBM(worldX * s.mountainBiomeScale,   worldZ * s.mountainBiomeScale, 3, 0.5f, 2f);
+
+        float threshold = s.mountainBiomeThreshold;
+        mountainW = Smoothstep(threshold - 0.08f, threshold + 0.08f, mountN);
+
+        float rem = 1f - mountainW;
+        tundraW   = rem * (1f - Smoothstep(0.20f, 0.35f, temp));  // high weight when cold
+        desertW   = rem * Smoothstep(0.65f, 0.80f, temp);          // high weight when hot
+        float tempW = rem - tundraW - desertW;
+        forestW   = tempW * Smoothstep(0.40f, 0.60f, humid);
+        plainsW   = tempW - forestW;
+    }
+
+    private static byte GetBlockForBiome(int worldX, int worldY, int surface, byte biome, in TerrainSettings s)
+    {
+        if (worldY > surface)
+            return worldY <= s.seaLevel ? BlockType.Water : BlockType.Air;
+
+        int depth = surface - worldY;
+
+        if (biome == BiomeDesert)
+            return depth < s.desertSandDepth ? BlockType.Sand : BlockType.Sandstone;
+
+        if (biome == BiomeTundra)
+        {
+            if (depth == 0)                     return BlockType.Snow;
+            if (depth <= s.tundraFrozenDepth)   return BlockType.FrozenDirt;
+            return BlockType.Stone;
+        }
+
+        // Plains, Forest, Mountain
+        bool nearSea = surface <= s.seaLevel + s.sandBeachWidth;
+        if (nearSea)
+            return depth < s.dirtDepth ? BlockType.Sand : BlockType.Stone;
+
+        if (depth == 0) return worldY >= s.snowAltitude ? BlockType.Snow : BlockType.Grass;
+        if (depth <= s.dirtDepth) return BlockType.Dirt;
+        return BlockType.Stone;
+    }
+
+    private static float Smoothstep(float edge0, float edge1, float x)
+    {
+        float t = Mathf.Clamp01((x - edge0) / (edge1 - edge0));
+        return t * t * (3f - 2f * t);
+    }
+
     private static float FBM(float x, float z, int octaves, float persistence, float lacunarity)
     {
         float value = 0f, amplitude = 1f, frequency = 1f, norm = 0f;
@@ -166,14 +221,7 @@ public static class TerrainGenerator
 }
 
 /// <summary>
-/// Burst-compiled terrain generation job. One job per chunk.
-/// Results are written to Blocks (flat byte array, index = x + y*16 + z*256).
-///
-/// Schedule on the main thread via job.Schedule(); poll handle.IsCompleted each Update;
-/// call handle.Complete() then read Blocks to build the PaletteChunk.
-///
-/// Uses noise.cnoise (Unity.Mathematics Classic Perlin, range [-1,1] normalised to [0,1]).
-/// Terrain shape is visually equivalent to the managed path but not sample-identical.
+/// Burst-compiled single-chunk terrain generation job.
 /// </summary>
 [BurstCompile]
 public struct GenerateChunkJob : IJob
@@ -183,8 +231,8 @@ public struct GenerateChunkJob : IJob
     public bool              LowDetail;
     [WriteOnly] public NativeArray<byte> Blocks;
 
-    private const int Size       = 16;   // PaletteChunk.Size
-    private const int VoxelCount = 4096; // Size³
+    private const int Size       = 16;
+    private const int VoxelCount = 4096;
 
     public void Execute()
     {
@@ -194,7 +242,6 @@ public struct GenerateChunkJob : IJob
         int offsetZ = ChunkCoord.z * Size;
         int chunkTop = offsetY + Size - 1;
 
-        // Fast-path: sample 4 corners to skip fully-solid and fully-air chunks
         int minSurface = int.MaxValue, maxSurface = int.MinValue;
         for (int cz = 0; cz <= Size; cz += Size)
         for (int cx = 0; cx <= Size; cx += Size)
@@ -204,7 +251,8 @@ public struct GenerateChunkJob : IJob
             if (h > maxSurface) maxSurface = h;
         }
 
-        if (chunkTop < minSurface - s.dirtDepth)
+        int deepThreshold = math.max(s.dirtDepth, s.desertSandDepth);
+        if (chunkTop < minSurface - deepThreshold)
         {
             for (int i = 0; i < VoxelCount; i++) Blocks[i] = BlockType.Stone;
             return;
@@ -218,21 +266,19 @@ public struct GenerateChunkJob : IJob
         for (int z = 0; z < Size; z++)
         for (int x = 0; x < Size; x++)
         {
-            int surface = GetSurface(offsetX + x, offsetZ + z, s, LowDetail);
+            int  surface = GetSurface(offsetX + x, offsetZ + z, s, LowDetail);
+            byte biome   = GetDominantBiome(offsetX + x, offsetZ + z, s);
             for (int y = 0; y < Size; y++)
                 Blocks[x + y * Size + z * Size * Size] =
-                    GetBlock(offsetX + x, offsetY + y, offsetZ + z, surface, s);
+                    GetBlock(offsetX + x, offsetY + y, surface, biome, s);
         }
     }
 
     // ── Burst-compatible terrain helpers ─────────────────────────────────────
-    // These mirror TerrainGenerator's managed methods but use Unity.Mathematics
-    // instead of UnityEngine.Mathf so Burst can compile and vectorise them.
 
     private static int GetSurface(int worldX, int worldZ, TerrainSettings s, bool lowDetail)
     {
         float wx = worldX, wz = worldZ;
-
         if (s.warpStrength > 0f)
         {
             int warpOctaves = lowDetail ? 1 : 2;
@@ -241,52 +287,89 @@ public struct GenerateChunkJob : IJob
             wx += (dX - 0.5f) * s.warpStrength * 2f;
             wz += (dZ - 0.5f) * s.warpStrength * 2f;
         }
-
         int terrainOctaves = lowDetail ? math.max(2, s.octaves - 2) : s.octaves;
         float fbm = FBM(wx * s.noiseScale, wz * s.noiseScale, terrainOctaves, s.persistence, s.lacunarity);
 
-        int biomeOctaves = lowDetail ? 2 : 3;
-        float biome = FBM(worldX * s.biomeScale + 100.3f, worldZ * s.biomeScale + 100.7f, biomeOctaves, 0.6f, 2f);
+        ComputeBiomeWeights(worldX, worldZ, s, lowDetail,
+            out float plainsW, out float forestW, out float desertW,
+            out float tundraW, out float mountainW);
 
-        float oceanH  = s.seaLevel  - s.oceanDepth  + fbm * s.oceanDepth * 0.5f;
-        float plainsH = s.baseHeight + fbm * s.plainsHeight;
-        float hillsH  = s.baseHeight + fbm * (s.plainsHeight + s.mountainHeight) * 0.5f;
-        float mountH  = s.baseHeight + math.pow(fbm, 1.4f) * s.mountainHeight;
-
-        float height;
-        if      (biome < 0.25f) height = math.lerp(oceanH,  plainsH, biome / 0.25f);
-        else if (biome < 0.50f) height = math.lerp(plainsH, hillsH,  (biome - 0.25f) / 0.25f);
-        else if (biome < 0.75f) height = math.lerp(hillsH,  mountH,  (biome - 0.50f) / 0.25f);
-        else                    height = mountH;
+        float height =
+            plainsW   * (s.baseHeight + fbm * s.plainsHeight) +
+            forestW   * (s.baseHeight + fbm * s.forestHeight) +
+            desertW   * (s.baseHeight + fbm * s.desertDuneHeight) +
+            tundraW   * (s.baseHeight + fbm * s.tundraHeight) +
+            mountainW * (s.baseHeight + math.pow(fbm, 1.4f) * s.mountainHeight);
 
         return (int)math.round(height);
     }
 
-    private static byte GetBlock(int worldX, int worldY, int worldZ, int surface, TerrainSettings s)
+    private static byte GetDominantBiome(int worldX, int worldZ, TerrainSettings s)
+    {
+        ComputeBiomeWeights(worldX, worldZ, s, false,
+            out float plainsW, out float forestW, out float desertW,
+            out float tundraW, out float mountainW);
+
+        byte biome = 0; // Plains
+        float max = plainsW;
+        if (forestW   > max) { max = forestW;   biome = 1; }
+        if (desertW   > max) { max = desertW;   biome = 2; }
+        if (tundraW   > max) { max = tundraW;   biome = 3; }
+        if (mountainW > max)                    biome = 4;
+        return biome;
+    }
+
+    private static void ComputeBiomeWeights(int worldX, int worldZ, TerrainSettings s, bool lowDetail,
+        out float plainsW, out float forestW, out float desertW,
+        out float tundraW, out float mountainW)
+    {
+        float temp   = FBM(worldX * s.tempScale    + 200f, worldZ * s.tempScale,    2, 0.5f, 2f);
+        float humid  = FBM(worldX * s.humidityScale +  50f, worldZ * s.humidityScale, 2, 0.5f, 2f);
+        float mountN = FBM(worldX * s.mountainBiomeScale,   worldZ * s.mountainBiomeScale, 3, 0.5f, 2f);
+
+        float threshold = s.mountainBiomeThreshold;
+        mountainW = Smoothstep(threshold - 0.08f, threshold + 0.08f, mountN);
+        float rem = 1f - mountainW;
+        tundraW  = rem * (1f - Smoothstep(0.20f, 0.35f, temp));
+        desertW  = rem * Smoothstep(0.65f, 0.80f, temp);
+        float tempW = rem - tundraW - desertW;
+        forestW  = tempW * Smoothstep(0.40f, 0.60f, humid);
+        plainsW  = tempW - forestW;
+    }
+
+    private static byte GetBlock(int worldX, int worldY, int surface, byte biome, TerrainSettings s)
     {
         if (worldY > surface)
             return worldY <= s.seaLevel ? BlockType.Water : BlockType.Air;
 
-        int  depth   = surface - worldY;
-        bool nearSea = surface <= s.seaLevel + s.sandBeachWidth;
+        int depth = surface - worldY;
 
-        if (depth == 0)
+        if (biome == 2) // Desert
+            return depth < s.desertSandDepth ? BlockType.Sand : BlockType.Sandstone;
+
+        if (biome == 3) // Tundra
         {
-            if (nearSea)                  return BlockType.Sand;
-            if (worldY >= s.snowAltitude) return BlockType.Snow;
-            return BlockType.Grass;
+            if (depth == 0)                   return BlockType.Snow;
+            if (depth <= s.tundraFrozenDepth) return BlockType.FrozenDirt;
+            return BlockType.Stone;
         }
 
-        if (depth <= s.dirtDepth)
-            return nearSea ? BlockType.Sand : BlockType.Dirt;
+        // Plains (0), Forest (1), Mountain (4)
+        bool nearSea = surface <= s.seaLevel + s.sandBeachWidth;
+        if (nearSea)
+            return depth < s.dirtDepth ? BlockType.Sand : BlockType.Stone;
 
+        if (depth == 0) return worldY >= s.snowAltitude ? BlockType.Snow : BlockType.Grass;
+        if (depth <= s.dirtDepth) return BlockType.Dirt;
         return BlockType.Stone;
     }
 
-    /// <summary>
-    /// FBM using noise.cnoise (Classic Perlin, range [-1,1] normalised to [0,1]).
-    /// Octave offsets match the managed path to produce comparable terrain shapes.
-    /// </summary>
+    private static float Smoothstep(float edge0, float edge1, float x)
+    {
+        float t = math.clamp((x - edge0) / (edge1 - edge0), 0f, 1f);
+        return t * t * (3f - 2f * t);
+    }
+
     private static float FBM(float x, float z, int octaves, float persistence, float lacunarity)
     {
         float value = 0f, amplitude = 1f, frequency = 1f, norm = 0f;
@@ -303,34 +386,23 @@ public struct GenerateChunkJob : IJob
 }
 
 /// <summary>
-/// Burst-compiled parallel terrain job. Generates N chunks in one IJobParallelFor dispatch,
-/// reducing scheduling overhead vs. N individual GenerateChunkJob instances.
-///
+/// Burst-compiled parallel terrain job. Generates N chunks in one IJobParallelFor dispatch.
 /// Each parallel index i writes to AllBlocks[i*VoxelCount..(i+1)*VoxelCount-1].
-///
-/// SurfaceCache (NativeParallelHashMap) provides a Burst-native, thread-safe height cache.
-/// Key = worldX &lt;&lt; 32 | (uint)worldZ. Adjacent chunks in the same batch share boundary
-/// corner samples, so cache hits occur for the fast-path corner checks.
+/// SurfaceCache provides a thread-safe height cache shared across all parallel indices.
 /// </summary>
 [BurstCompile]
 public struct GenerateChunksBatchJob : IJobParallelFor
 {
     public  TerrainSettings Settings;
-    [ReadOnly] public NativeArray<int3> Coords; // one int3 per chunk
+    [ReadOnly] public NativeArray<int3> Coords;
     public  bool LowDetail;
 
     [WriteOnly, NativeDisableParallelForRestriction]
-    public NativeArray<byte> AllBlocks; // length = Coords.Length * VoxelCount
+    public NativeArray<byte> AllBlocks;
 
-    /// <summary>
-    /// Shared surface-height cache — read by all parallel indices.
-    /// NativeDisableContainerSafetyRestriction suppresses the aliasing check: NativeParallelHashMap
-    /// is explicitly designed for concurrent TryGetValue + TryAdd, so this is safe.
-    /// </summary>
     [ReadOnly, NativeDisableContainerSafetyRestriction]
     public NativeParallelHashMap<long, int> SurfaceCache;
 
-    /// <summary>ParallelWriter — allows concurrent TryAdd from all parallel indices.</summary>
     [NativeDisableContainerSafetyRestriction]
     public NativeParallelHashMap<long, int>.ParallelWriter SurfaceCacheWriter;
 
@@ -347,7 +419,6 @@ public struct GenerateChunksBatchJob : IJobParallelFor
         int  chunkTop = offsetY + Size - 1;
         int  baseIdx  = i * VoxelCount;
 
-        // Fast-path corners (cached — shared with neighbouring chunks' corners)
         int h00 = GetSurface(offsetX,        offsetZ,        s);
         int h10 = GetSurface(offsetX + Size, offsetZ,        s);
         int h01 = GetSurface(offsetX,        offsetZ + Size, s);
@@ -355,7 +426,8 @@ public struct GenerateChunksBatchJob : IJobParallelFor
         int minCorner = math.min(math.min(h00, h10), math.min(h01, h11));
         int maxCorner = math.max(math.max(h00, h10), math.max(h01, h11));
 
-        if (chunkTop < minCorner - s.dirtDepth)
+        int deepThreshold = math.max(s.dirtDepth, s.desertSandDepth);
+        if (chunkTop < minCorner - deepThreshold)
         {
             for (int j = 0; j < VoxelCount; j++) AllBlocks[baseIdx + j] = BlockType.Stone;
             return;
@@ -366,23 +438,29 @@ public struct GenerateChunksBatchJob : IJobParallelFor
             return;
         }
 
-        // Pre-compute all 256 surface heights for this chunk, caching each value.
-        // Reading from a pre-computed array is faster than re-calling GetSurface per voxel.
-        var surfaces = new NativeArray<int>(Size * Size, Allocator.Temp,
-                                            NativeArrayOptions.UninitializedMemory);
-        for (int z = 0; z < Size; z++)
-        for (int x = 0; x < Size; x++)
-            surfaces[x + z * Size] = GetSurface(offsetX + x, offsetZ + z, s);
+        var surfaces = new NativeArray<int> (Size * Size, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
+        var biomes   = new NativeArray<byte>(Size * Size, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
 
         for (int z = 0; z < Size; z++)
         for (int x = 0; x < Size; x++)
         {
-            int surface = surfaces[x + z * Size];
-            for (int y = 0; y < Size; y++)
-                AllBlocks[baseIdx + x + y * Size + z * Size * Size] =
-                    GetBlock(offsetX + x, offsetY + y, offsetZ + z, surface, s);
+            int col = x + z * Size;
+            surfaces[col] = GetSurface(offsetX + x, offsetZ + z, s);
+            biomes[col]   = GetDominantBiome(offsetX + x, offsetZ + z, s);
         }
 
+        for (int z = 0; z < Size; z++)
+        for (int x = 0; x < Size; x++)
+        {
+            int  col     = x + z * Size;
+            int  surface = surfaces[col];
+            byte biome   = biomes[col];
+            for (int y = 0; y < Size; y++)
+                AllBlocks[baseIdx + x + y * Size + z * Size * Size] =
+                    GetBlock(offsetX + x, offsetY + y, surface, biome, s);
+        }
+
+        biomes.Dispose();
         surfaces.Dispose();
     }
 
@@ -395,7 +473,7 @@ public struct GenerateChunksBatchJob : IJobParallelFor
             long key = ((long)worldX << 32) | (uint)worldZ;
             if (SurfaceCache.TryGetValue(key, out int cached)) return cached;
             int result = ComputeSurface(worldX, worldZ, s);
-            SurfaceCacheWriter.TryAdd(key, result); // no-op if another index already added it
+            SurfaceCacheWriter.TryAdd(key, result);
             return result;
         }
         return ComputeSurface(worldX, worldZ, s);
@@ -405,46 +483,94 @@ public struct GenerateChunksBatchJob : IJobParallelFor
 
     private static int ComputeSurface(int worldX, int worldZ, TerrainSettings s)
     {
-        bool lowDetail = false; // full detail only — low-detail path does not cache
         float wx = worldX, wz = worldZ;
         if (s.warpStrength > 0f)
         {
-            int warpOctaves = lowDetail ? 1 : 2;
-            float dX = FBM(wx * s.warpScale,         wz * s.warpScale,         warpOctaves, 0.5f, 2f);
-            float dZ = FBM(wx * s.warpScale + 3.71f, wz * s.warpScale + 1.57f, warpOctaves, 0.5f, 2f);
+            float dX = FBM(wx * s.warpScale,         wz * s.warpScale,         2, 0.5f, 2f);
+            float dZ = FBM(wx * s.warpScale + 3.71f, wz * s.warpScale + 1.57f, 2, 0.5f, 2f);
             wx += (dX - 0.5f) * s.warpStrength * 2f;
             wz += (dZ - 0.5f) * s.warpStrength * 2f;
         }
-        int terrainOctaves = s.octaves; // full detail
-        float fbm = FBM(wx * s.noiseScale, wz * s.noiseScale, terrainOctaves, s.persistence, s.lacunarity);
-        int biomeOctaves = 3;
-        float biome = FBM(worldX * s.biomeScale + 100.3f, worldZ * s.biomeScale + 100.7f, biomeOctaves, 0.6f, 2f);
-        float oceanH  = s.seaLevel  - s.oceanDepth  + fbm * s.oceanDepth * 0.5f;
-        float plainsH = s.baseHeight + fbm * s.plainsHeight;
-        float hillsH  = s.baseHeight + fbm * (s.plainsHeight + s.mountainHeight) * 0.5f;
-        float mountH  = s.baseHeight + math.pow(fbm, 1.4f) * s.mountainHeight;
-        float height;
-        if      (biome < 0.25f) height = math.lerp(oceanH,  plainsH, biome / 0.25f);
-        else if (biome < 0.50f) height = math.lerp(plainsH, hillsH,  (biome - 0.25f) / 0.25f);
-        else if (biome < 0.75f) height = math.lerp(hillsH,  mountH,  (biome - 0.50f) / 0.25f);
-        else                    height = mountH;
+        float fbm = FBM(wx * s.noiseScale, wz * s.noiseScale, s.octaves, s.persistence, s.lacunarity);
+
+        ComputeBiomeWeights(worldX, worldZ, s,
+            out float plainsW, out float forestW, out float desertW,
+            out float tundraW, out float mountainW);
+
+        float height =
+            plainsW   * (s.baseHeight + fbm * s.plainsHeight) +
+            forestW   * (s.baseHeight + fbm * s.forestHeight) +
+            desertW   * (s.baseHeight + fbm * s.desertDuneHeight) +
+            tundraW   * (s.baseHeight + fbm * s.tundraHeight) +
+            mountainW * (s.baseHeight + math.pow(fbm, 1.4f) * s.mountainHeight);
+
         return (int)math.round(height);
     }
 
-    private static byte GetBlock(int worldX, int worldY, int worldZ, int surface, TerrainSettings s)
+    private static byte GetDominantBiome(int worldX, int worldZ, TerrainSettings s)
+    {
+        ComputeBiomeWeights(worldX, worldZ, s,
+            out float plainsW, out float forestW, out float desertW,
+            out float tundraW, out float mountainW);
+
+        byte biome = 0; // Plains
+        float max = plainsW;
+        if (forestW   > max) { max = forestW;   biome = 1; }
+        if (desertW   > max) { max = desertW;   biome = 2; }
+        if (tundraW   > max) { max = tundraW;   biome = 3; }
+        if (mountainW > max)                    biome = 4;
+        return biome;
+    }
+
+    private static void ComputeBiomeWeights(int worldX, int worldZ, TerrainSettings s,
+        out float plainsW, out float forestW, out float desertW,
+        out float tundraW, out float mountainW)
+    {
+        float temp   = FBM(worldX * s.tempScale    + 200f, worldZ * s.tempScale,    2, 0.5f, 2f);
+        float humid  = FBM(worldX * s.humidityScale +  50f, worldZ * s.humidityScale, 2, 0.5f, 2f);
+        float mountN = FBM(worldX * s.mountainBiomeScale,   worldZ * s.mountainBiomeScale, 3, 0.5f, 2f);
+
+        float threshold = s.mountainBiomeThreshold;
+        mountainW = Smoothstep(threshold - 0.08f, threshold + 0.08f, mountN);
+        float rem = 1f - mountainW;
+        tundraW  = rem * (1f - Smoothstep(0.20f, 0.35f, temp));
+        desertW  = rem * Smoothstep(0.65f, 0.80f, temp);
+        float tempW = rem - tundraW - desertW;
+        forestW  = tempW * Smoothstep(0.40f, 0.60f, humid);
+        plainsW  = tempW - forestW;
+    }
+
+    private static byte GetBlock(int worldX, int worldY, int surface, byte biome, TerrainSettings s)
     {
         if (worldY > surface)
             return worldY <= s.seaLevel ? BlockType.Water : BlockType.Air;
-        int  depth   = surface - worldY;
-        bool nearSea = surface <= s.seaLevel + s.sandBeachWidth;
-        if (depth == 0)
+
+        int depth = surface - worldY;
+
+        if (biome == 2) // Desert
+            return depth < s.desertSandDepth ? BlockType.Sand : BlockType.Sandstone;
+
+        if (biome == 3) // Tundra
         {
-            if (nearSea)                  return BlockType.Sand;
-            if (worldY >= s.snowAltitude) return BlockType.Snow;
-            return BlockType.Grass;
+            if (depth == 0)                   return BlockType.Snow;
+            if (depth <= s.tundraFrozenDepth) return BlockType.FrozenDirt;
+            return BlockType.Stone;
         }
-        if (depth <= s.dirtDepth) return nearSea ? BlockType.Sand : BlockType.Dirt;
+
+        // Plains (0), Forest (1), Mountain (4)
+        bool nearSea = surface <= s.seaLevel + s.sandBeachWidth;
+        if (nearSea)
+            return depth < s.dirtDepth ? BlockType.Sand : BlockType.Stone;
+
+        if (depth == 0) return worldY >= s.snowAltitude ? BlockType.Snow : BlockType.Grass;
+        if (depth <= s.dirtDepth) return BlockType.Dirt;
         return BlockType.Stone;
+    }
+
+    private static float Smoothstep(float edge0, float edge1, float x)
+    {
+        float t = math.clamp((x - edge0) / (edge1 - edge0), 0f, 1f);
+        return t * t * (3f - 2f * t);
     }
 
     private static float FBM(float x, float z, int octaves, float persistence, float lacunarity)

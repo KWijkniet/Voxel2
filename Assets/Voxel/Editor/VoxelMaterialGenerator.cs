@@ -4,7 +4,7 @@ using UnityEditor;
 
 /// <summary>
 /// Generates a pixel-art texture atlas and a URP Lit material from it.
-/// Atlas layout: [Stone | Dirt | Grass | Sand | Water | Snow] — one texel per block type.
+/// Atlas layout: [Stone | Dirt | Grass | Sand | Water | Snow | Sandstone | FrozenDirt] — one texel per block type.
 /// Point filtering ensures clean colour boundaries with no bleed.
 /// </summary>
 public static class VoxelMaterialGenerator
@@ -13,15 +13,17 @@ public static class VoxelMaterialGenerator
     private const string TexturePath   = OutputFolder + "/VoxelAtlas.png";
     private const string MaterialPath  = OutputFolder + "/VoxelTerrain.mat";
 
-    // One colour per solid block type (order matches BlockType: Stone=1 … Snow=6)
+    // One colour per solid block type (order matches BlockType: Stone=1 … FrozenDirt=8)
     private static readonly Color32[] BlockColours =
     {
-        new Color32(120, 120, 120, 255), // Stone  — grey
-        new Color32(139,  90,  43, 255), // Dirt   — brown
-        new Color32( 67, 155,  40, 255), // Grass  — green
-        new Color32(194, 178, 128, 255), // Sand   — tan
-        new Color32( 30, 100, 200, 255), // Water  — blue
-        new Color32(220, 235, 255, 255), // Snow   — ice white
+        new Color32(120, 120, 120, 255), // Stone      — grey
+        new Color32(139,  90,  43, 255), // Dirt       — brown
+        new Color32( 67, 155,  40, 255), // Grass      — green
+        new Color32(194, 178, 128, 255), // Sand       — tan
+        new Color32( 30, 100, 200, 255), // Water      — blue
+        new Color32(220, 235, 255, 255), // Snow       — ice white
+        new Color32(210, 180,  90, 255), // Sandstone  — warm tan-orange
+        new Color32(100,  95, 110, 255), // FrozenDirt — cold grey-blue
     };
 
     /// <summary>Generates the atlas texture and material, saves them as assets, and returns the material.</summary>

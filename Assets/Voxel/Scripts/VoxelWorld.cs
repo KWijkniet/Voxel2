@@ -35,7 +35,10 @@ public class VoxelWorld : MonoBehaviour
     [Header("Terrain — Heights")]
     public int   baseHeight     = 2;
     public int   plainsHeight   = 22;
+    public int   forestHeight   = 28;
     public int   mountainHeight = 80;
+    public int   tundraHeight   = 12;
+    public int   desertDuneHeight = 7;
     public int   oceanDepth     = 12;
 
     [Header("Terrain — Noise")]
@@ -48,17 +51,23 @@ public class VoxelWorld : MonoBehaviour
     [Range(1f, 4f)]
     public float lacunarity  = 2.0f;
 
-    [Header("Terrain — Biome")]
-    public float biomeScale = 0.0008f;
+    [Header("Terrain — Biomes")]
+    public float tempScale               = 0.003f;
+    public float humidityScale           = 0.004f;
+    public float mountainBiomeScale      = 0.003f;
+    [Range(0f, 1f)]
+    public float mountainBiomeThreshold  = 0.62f;
 
     [Header("Terrain — Domain Warp")]
     public float warpStrength = 25f;
     public float warpScale    = 0.005f;
 
     [Header("Terrain — Block Layers")]
-    public int dirtDepth      = 4;
-    public int sandBeachWidth = 3;
-    public int snowAltitude   = 75;
+    public int dirtDepth        = 3;
+    public int sandBeachWidth   = 3;
+    public int snowAltitude     = 75;
+    public int desertSandDepth  = 6;
+    public int tundraFrozenDepth = 3;
 
     [Header("Rendering")]
     public Material chunkMaterial;
@@ -955,21 +964,29 @@ public class VoxelWorld : MonoBehaviour
 
     public TerrainSettings GetTerrainSettings() => new TerrainSettings
     {
-        seaLevel       = seaLevel,
-        baseHeight     = baseHeight,
-        plainsHeight   = plainsHeight,
-        mountainHeight = mountainHeight,
-        oceanDepth     = oceanDepth,
-        noiseScale     = noiseScale,
-        octaves        = octaves,
-        persistence    = persistence,
-        lacunarity     = lacunarity,
-        biomeScale     = biomeScale,
-        warpStrength   = warpStrength,
-        warpScale      = warpScale,
-        dirtDepth      = dirtDepth,
-        sandBeachWidth = sandBeachWidth,
-        snowAltitude   = snowAltitude,
+        seaLevel               = seaLevel,
+        baseHeight             = baseHeight,
+        plainsHeight           = plainsHeight,
+        forestHeight           = forestHeight,
+        mountainHeight         = mountainHeight,
+        tundraHeight           = tundraHeight,
+        desertDuneHeight       = desertDuneHeight,
+        oceanDepth             = oceanDepth,
+        noiseScale             = noiseScale,
+        octaves                = octaves,
+        persistence            = persistence,
+        lacunarity             = lacunarity,
+        tempScale              = tempScale,
+        humidityScale          = humidityScale,
+        mountainBiomeScale     = mountainBiomeScale,
+        mountainBiomeThreshold = mountainBiomeThreshold,
+        warpStrength           = warpStrength,
+        warpScale              = warpScale,
+        dirtDepth              = dirtDepth,
+        sandBeachWidth         = sandBeachWidth,
+        snowAltitude           = snowAltitude,
+        desertSandDepth        = desertSandDepth,
+        tundraFrozenDepth      = tundraFrozenDepth,
     };
 
     // ── Public API ────────────────────────────────────────────────────────────
