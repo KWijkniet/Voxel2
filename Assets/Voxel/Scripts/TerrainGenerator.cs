@@ -1,6 +1,7 @@
 using UnityEngine;
 using Unity.Burst;
 using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Mathematics;
 using System.Collections.Concurrent;
@@ -286,6 +287,166 @@ public struct GenerateChunkJob : IJob
     /// FBM using noise.cnoise (Classic Perlin, range [-1,1] normalised to [0,1]).
     /// Octave offsets match the managed path to produce comparable terrain shapes.
     /// </summary>
+    private static float FBM(float x, float z, int octaves, float persistence, float lacunarity)
+    {
+        float value = 0f, amplitude = 1f, frequency = 1f, norm = 0f;
+        for (int i = 0; i < octaves; i++)
+        {
+            float2 pos = new float2(x * frequency + i * 7.31f, z * frequency + i * 5.17f);
+            value     += (noise.cnoise(pos) + 1f) * 0.5f * amplitude;
+            norm      += amplitude;
+            amplitude *= persistence;
+            frequency *= lacunarity;
+        }
+        return value / norm;
+    }
+}
+
+/// <summary>
+/// Burst-compiled parallel terrain job. Generates N chunks in one IJobParallelFor dispatch,
+/// reducing scheduling overhead vs. N individual GenerateChunkJob instances.
+///
+/// Each parallel index i writes to AllBlocks[i*VoxelCount..(i+1)*VoxelCount-1].
+///
+/// SurfaceCache (NativeParallelHashMap) provides a Burst-native, thread-safe height cache.
+/// Key = worldX &lt;&lt; 32 | (uint)worldZ. Adjacent chunks in the same batch share boundary
+/// corner samples, so cache hits occur for the fast-path corner checks.
+/// </summary>
+[BurstCompile]
+public struct GenerateChunksBatchJob : IJobParallelFor
+{
+    public  TerrainSettings Settings;
+    [ReadOnly] public NativeArray<int3> Coords; // one int3 per chunk
+    public  bool LowDetail;
+
+    [WriteOnly, NativeDisableParallelForRestriction]
+    public NativeArray<byte> AllBlocks; // length = Coords.Length * VoxelCount
+
+    /// <summary>
+    /// Shared surface-height cache — read by all parallel indices.
+    /// NativeDisableContainerSafetyRestriction suppresses the aliasing check: NativeParallelHashMap
+    /// is explicitly designed for concurrent TryGetValue + TryAdd, so this is safe.
+    /// </summary>
+    [ReadOnly, NativeDisableContainerSafetyRestriction]
+    public NativeParallelHashMap<long, int> SurfaceCache;
+
+    /// <summary>ParallelWriter — allows concurrent TryAdd from all parallel indices.</summary>
+    [NativeDisableContainerSafetyRestriction]
+    public NativeParallelHashMap<long, int>.ParallelWriter SurfaceCacheWriter;
+
+    private const int Size       = VoxelChunk.Size;
+    private const int VoxelCount = VoxelChunk.VoxelCount;
+
+    public void Execute(int i)
+    {
+        TerrainSettings s    = Settings;
+        int3 coord   = Coords[i];
+        int  offsetX = coord.x * Size;
+        int  offsetY = coord.y * Size;
+        int  offsetZ = coord.z * Size;
+        int  chunkTop = offsetY + Size - 1;
+        int  baseIdx  = i * VoxelCount;
+
+        // Fast-path corners (cached — shared with neighbouring chunks' corners)
+        int h00 = GetSurface(offsetX,        offsetZ,        s);
+        int h10 = GetSurface(offsetX + Size, offsetZ,        s);
+        int h01 = GetSurface(offsetX,        offsetZ + Size, s);
+        int h11 = GetSurface(offsetX + Size, offsetZ + Size, s);
+        int minCorner = math.min(math.min(h00, h10), math.min(h01, h11));
+        int maxCorner = math.max(math.max(h00, h10), math.max(h01, h11));
+
+        if (chunkTop < minCorner - s.dirtDepth)
+        {
+            for (int j = 0; j < VoxelCount; j++) AllBlocks[baseIdx + j] = BlockType.Stone;
+            return;
+        }
+        if (offsetY > maxCorner && offsetY > s.seaLevel)
+        {
+            for (int j = 0; j < VoxelCount; j++) AllBlocks[baseIdx + j] = BlockType.Air;
+            return;
+        }
+
+        // Pre-compute all 256 surface heights for this chunk, caching each value.
+        // Reading from a pre-computed array is faster than re-calling GetSurface per voxel.
+        var surfaces = new NativeArray<int>(Size * Size, Allocator.Temp,
+                                            NativeArrayOptions.UninitializedMemory);
+        for (int z = 0; z < Size; z++)
+        for (int x = 0; x < Size; x++)
+            surfaces[x + z * Size] = GetSurface(offsetX + x, offsetZ + z, s);
+
+        for (int z = 0; z < Size; z++)
+        for (int x = 0; x < Size; x++)
+        {
+            int surface = surfaces[x + z * Size];
+            for (int y = 0; y < Size; y++)
+                AllBlocks[baseIdx + x + y * Size + z * Size * Size] =
+                    GetBlock(offsetX + x, offsetY + y, offsetZ + z, surface, s);
+        }
+
+        surfaces.Dispose();
+    }
+
+    // ── Cache-aware surface height lookup ─────────────────────────────────────
+
+    private int GetSurface(int worldX, int worldZ, TerrainSettings s)
+    {
+        if (!LowDetail)
+        {
+            long key = ((long)worldX << 32) | (uint)worldZ;
+            if (SurfaceCache.TryGetValue(key, out int cached)) return cached;
+            int result = ComputeSurface(worldX, worldZ, s);
+            SurfaceCacheWriter.TryAdd(key, result); // no-op if another index already added it
+            return result;
+        }
+        return ComputeSurface(worldX, worldZ, s);
+    }
+
+    // ── Burst-compatible terrain helpers ─────────────────────────────────────
+
+    private static int ComputeSurface(int worldX, int worldZ, TerrainSettings s)
+    {
+        bool lowDetail = false; // full detail only — low-detail path does not cache
+        float wx = worldX, wz = worldZ;
+        if (s.warpStrength > 0f)
+        {
+            int warpOctaves = lowDetail ? 1 : 2;
+            float dX = FBM(wx * s.warpScale,         wz * s.warpScale,         warpOctaves, 0.5f, 2f);
+            float dZ = FBM(wx * s.warpScale + 3.71f, wz * s.warpScale + 1.57f, warpOctaves, 0.5f, 2f);
+            wx += (dX - 0.5f) * s.warpStrength * 2f;
+            wz += (dZ - 0.5f) * s.warpStrength * 2f;
+        }
+        int terrainOctaves = s.octaves; // full detail
+        float fbm = FBM(wx * s.noiseScale, wz * s.noiseScale, terrainOctaves, s.persistence, s.lacunarity);
+        int biomeOctaves = 3;
+        float biome = FBM(worldX * s.biomeScale + 100.3f, worldZ * s.biomeScale + 100.7f, biomeOctaves, 0.6f, 2f);
+        float oceanH  = s.seaLevel  - s.oceanDepth  + fbm * s.oceanDepth * 0.5f;
+        float plainsH = s.baseHeight + fbm * s.plainsHeight;
+        float hillsH  = s.baseHeight + fbm * (s.plainsHeight + s.mountainHeight) * 0.5f;
+        float mountH  = s.baseHeight + math.pow(fbm, 1.4f) * s.mountainHeight;
+        float height;
+        if      (biome < 0.25f) height = math.lerp(oceanH,  plainsH, biome / 0.25f);
+        else if (biome < 0.50f) height = math.lerp(plainsH, hillsH,  (biome - 0.25f) / 0.25f);
+        else if (biome < 0.75f) height = math.lerp(hillsH,  mountH,  (biome - 0.50f) / 0.25f);
+        else                    height = mountH;
+        return (int)math.round(height);
+    }
+
+    private static byte GetBlock(int worldX, int worldY, int worldZ, int surface, TerrainSettings s)
+    {
+        if (worldY > surface)
+            return worldY <= s.seaLevel ? BlockType.Water : BlockType.Air;
+        int  depth   = surface - worldY;
+        bool nearSea = surface <= s.seaLevel + s.sandBeachWidth;
+        if (depth == 0)
+        {
+            if (nearSea)                  return BlockType.Sand;
+            if (worldY >= s.snowAltitude) return BlockType.Snow;
+            return BlockType.Grass;
+        }
+        if (depth <= s.dirtDepth) return nearSea ? BlockType.Sand : BlockType.Dirt;
+        return BlockType.Stone;
+    }
+
     private static float FBM(float x, float z, int octaves, float persistence, float lacunarity)
     {
         float value = 0f, amplitude = 1f, frequency = 1f, norm = 0f;

@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
@@ -8,19 +7,20 @@ using UnityEngine;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
+using UnityEngine.Rendering;
+using UnityEngine.Profiling;
 
 /// <summary>
 /// Variable-size LOD rendering:
 ///
 ///   LOD 0 (within AlignedViewDistance):
-///     Individual 16³ chunk meshes, full-detail. Drawn via Graphics.DrawMesh — no GameObjects.
+///     Individual 16³ chunk meshes, full-detail. Drawn via Graphics.DrawMesh.
+///     Pipeline: GenerateChunkJob (Burst) → BuildChunkMeshJob (Burst, chained dependency).
+///     No Task.Run, no SemaphoreSlim. Unity job system saturates all CPU cores.
 ///
 ///   LOD L (ring L, beyond LOD L-1):
 ///     Regions of (1&lt;&lt;L)×(1&lt;&lt;L) chunks, sampled at step (1&lt;&lt;L) voxels/cell.
-///     Every LOD mesh always has ~16×16 XZ cells → constant GPU cost per mesh.
-///     e.g. LOD 1 = 2×2 chunks / step 2, LOD 2 = 4×4 / step 4, LOD 3 = 8×8 / step 8.
-///
-/// Example: viewDistance=8, lodLevels=3 → 8→16→32→64 chunk radii = 1024 m max.
+///     Pipeline: region data assembled from VoxelChunk.Blocks → Task.Run mesh build.
 /// </summary>
 public class VoxelWorld : MonoBehaviour
 {
@@ -49,11 +49,9 @@ public class VoxelWorld : MonoBehaviour
     public float lacunarity  = 2.0f;
 
     [Header("Terrain — Biome")]
-    [Tooltip("Scale of biome transitions (very low = large biomes)")]
     public float biomeScale = 0.0008f;
 
     [Header("Terrain — Domain Warp")]
-    [Tooltip("Max coordinate warp in voxels (0 = disable)")]
     public float warpStrength = 25f;
     public float warpScale    = 0.005f;
 
@@ -65,28 +63,27 @@ public class VoxelWorld : MonoBehaviour
     [Header("Rendering")]
     public Material chunkMaterial;
 
-    [Header("Async")]
-    public int maxConcurrentTasks  = 4;
-    public int maxApplyPerFrame    = 6;
-    [Tooltip("Max new tasks submitted per UpdateLoadedChunks call. " +
-             "Half goes to LOD 0 mesh tasks (closest first), half to region data tasks. " +
-             "Lower = tighter prioritization; higher = loads more at once.")]
-    public int maxRequestsPerUpdate = 16;
+    [Header("Performance")]
+    [Tooltip("Max LOD 0 chunk pipelines (terrain+mesh jobs) in flight at once. " +
+             "Higher = more parallelism but more memory. Recommend: CPU cores × 2.")]
+    public int maxPipelinesInFlight = 32;
+    [Tooltip("Max LOD 0 chunk pipelines applied (meshes created) per frame.")]
+    public int maxApplyPerFrame     = 12;
+    [Tooltip("Max new pipeline submissions per UpdateLoadedChunks call.")]
+    public int maxRequestsPerUpdate = 32;
+    [Tooltip("Semaphore slots for region (LOD 1+) mesh-build tasks.")]
+    public int maxRegionTasks = 8;
+    [Tooltip("Max chunks per IJobParallelFor terrain dispatch. Smaller = lower first-chunk latency " +
+             "(mesh jobs for earlier sub-batches start before later terrain finishes). " +
+             "Recommend: CPU core count (typically 4–16).")]
+    public int terrainBatchSize = 8;
 
     [Header("LOD")]
-    [Tooltip("Number of LOD levels for region rendering. Each level doubles the view radius.")]
     [Range(0, 3)]
     public int lodLevels = 2;
 
-
     // ── Derived ───────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// viewDistance rounded up to the nearest (1&lt;&lt;lodLevels) multiple.
-    /// Ensures all LOD zone boundaries land exactly on a region edge for every level,
-    /// so no region ever straddles the LOD 0 / LOD 1 boundary.
-    /// e.g. lodLevels=2 → snap=4: viewDistance=6 → 8.  lodLevels=3 → snap=8: vd=6 → 8.
-    /// </summary>
     public int AlignedViewDistance
     {
         get { int snap = 1 << Mathf.Max(1, lodLevels); return ((viewDistance + snap - 1) / snap) * snap; }
@@ -94,42 +91,107 @@ public class VoxelWorld : MonoBehaviour
 
     private int MaxRadius => AlignedViewDistance * (1 << lodLevels);
 
-    // ── LOD 0 storage (individual chunks) ─────────────────────────────────────
+    // ── LOD 0 storage ─────────────────────────────────────────────────────────
 
-    private readonly Dictionary<Vector3Int, PaletteChunk> _chunks        = new();
-    private readonly Dictionary<Vector3Int, Mesh>         _chunkMeshes   = new();
-    private readonly HashSet<Vector3Int>                  _desiredCoords = new();
-    private readonly HashSet<Vector3Int>                  _inFlight      = new();
-    private readonly ConcurrentQueue<ChunkBuildResult>    _readyQueue    = new();
+    // VoxelChunk wraps a Persistent NativeArray<byte>. We own the lifetime.
+    private readonly Dictionary<Vector3Int, VoxelChunk> _chunks      = new();
+    private readonly Dictionary<Vector3Int, Mesh>        _chunkMeshes = new();
+    private readonly HashSet<Vector3Int>                  _desiredCoords  = new();
+    private readonly HashSet<Vector3Int>                  _inFlight       = new();
+    // Desired coords that are neither meshed nor in-flight. Kept in sync incrementally
+    // so GatherAndSortLOD0 iterates only actionable work instead of all desiredCoords.
+    private readonly HashSet<Vector3Int>                  _pendingCoords  = new();
 
-    private readonly struct ChunkBuildResult
+    // ── LOD 0 pipeline (terrain IJob → mesh IJob, chained) ───────────────────
+
+    /// <summary>
+    /// Owns the flat NativeArray&lt;byte&gt; (count*VoxelCount bytes) produced by
+    /// GenerateChunksBatchJob. Released when all pipelines in the batch complete.
+    /// </summary>
+    private class BatchBuffer
     {
-        public readonly Vector3Int       Coord;
-        public readonly PaletteChunk     Chunk;
-        public readonly WritableMeshData MeshData; // null = data-only (for region use)
-        public ChunkBuildResult(Vector3Int c, PaletteChunk ch, WritableMeshData m)
-        { Coord = c; Chunk = ch; MeshData = m; }
+        public NativeArray<byte> Data;
+        /// <summary>
+        /// Chunk coords passed to GenerateChunksBatchJob. Stored here (Persistent) to avoid
+        /// TempJob 4-frame lifetime warnings when the terrain job doesn't complete quickly.
+        /// </summary>
+        public NativeArray<int3> Coords;
+        public int Pending;
+
+        public BatchBuffer(int count)
+        {
+            Data    = new NativeArray<byte>(count * VoxelChunk.VoxelCount, Allocator.Persistent,
+                                            NativeArrayOptions.UninitializedMemory);
+            Coords  = new NativeArray<int3>(count, Allocator.Persistent,
+                                            NativeArrayOptions.UninitializedMemory);
+            Pending = count;
+        }
+
+        public void Release()
+        {
+            if (--Pending > 0) return;
+            if (Data.IsCreated)   Data.Dispose();
+            if (Coords.IsCreated) Coords.Dispose();
+        }
     }
 
-    // Tracks scheduled Burst generation jobs until their JobHandle is complete.
-    private struct PendingGenerationJob
+    /// <summary>
+    /// One per in-flight LOD 0 chunk. The terrain job writes to Voxels; the mesh job
+    /// reads Voxels (and neighbour snapshots) and appends to the NativeLists.
+    /// Handle is the mesh job's handle (which implicitly waits for terrain).
+    /// For data-only requests (BuildMesh=false) Handle is the terrain handle directly.
+    /// </summary>
+    private struct ChunkPipeline
     {
-        public Vector3Int        Coord;
-        public JobHandle         Handle;
-        public NativeArray<byte> Blocks;
-        public bool              BuildMesh;
-        public PaletteChunk[]    Neighbours; // pre-fetched for mesh build; null if !BuildMesh
-        public bool              Discarded;  // true when position changed before job completed
+        public Vector3Int Coord;
+        public JobHandle  Handle;        // mesh handle (or terrain handle if !BuildMesh)
+
+        /// <summary>
+        /// Sub-array view into Batch.Data when Batch != null; owned Persistent allocation otherwise.
+        /// Do NOT call Dispose() on this directly — call Batch.Release() or Voxels.Dispose() based on Batch.
+        /// </summary>
+        public NativeArray<byte> Voxels;
+
+        /// <summary>
+        /// Non-null when terrain was generated via GenerateChunksBatchJob.
+        /// Call Batch.Release() on pipeline completion to manage shared buffer lifetime.
+        /// </summary>
+        public BatchBuffer Batch;
+
+        // Only valid when BuildMesh = true:
+        public NativeArray<byte>[] NeighbourSnapshots; // 6 × VoxelCount, owned
+        public NativeList<float3>  MeshVerts;
+        public NativeList<float3>  MeshNorms;
+        public NativeList<float2>  MeshUVs;
+        public NativeList<int>     MeshTris;
+
+        public bool BuildMesh;
+        public bool Discarded;
     }
-    private readonly List<PendingGenerationJob> _pendingGenerationJobs = new();
+
+    private readonly List<ChunkPipeline> _pipelines = new();
+
+    // Scratch lists to avoid per-frame allocations in hot loops
+    private readonly List<int>        _scratchCompleted  = new();
+    private readonly List<int>        _scratchRemove     = new();
+    private readonly List<Vector3Int> _scratchUnloadC    = new();
+    private readonly List<Vector3Int> _scratchUnloadR    = new();
+    private readonly List<Vector3Int> _scratchEvictC     = new();
+    private readonly List<Vector3Int> _scratchEvictR     = new();
+    private readonly List<Vector3Int> _scratchRequestC   = new();
+    private readonly List<Vector3Int> _scratchDataCoords = new(); // data-only region chunk requests
+    private readonly List<Vector3Int> _scratchRegions    = new();
+    private readonly List<(float dist, Vector3Int coord)> _scratchChunkSort = new();
+    private readonly Dictionary<Vector3Int, float>        _scratchRegionDist = new();
 
     // ── LOD 1+ storage (regions) ──────────────────────────────────────────────
 
-    private readonly Dictionary<Vector3Int, RegionData>  _regions       = new();
-    private readonly Dictionary<Vector3Int, Mesh>         _regionMeshes  = new();
+    private readonly Dictionary<Vector3Int, RegionData>  _regions          = new();
+    private readonly Dictionary<Vector3Int, Mesh>         _regionMeshes     = new();
     private readonly HashSet<Vector3Int>                  _desiredRegions   = new();
     private readonly HashSet<Vector3Int>                  _regionInFlight   = new();
     private readonly ConcurrentQueue<RegionBuildResult>   _regionReadyQueue = new();
+    private readonly ConcurrentQueue<Vector3Int>          _cancelledRegions = new();
 
     private readonly struct RegionBuildResult
     {
@@ -138,41 +200,32 @@ public class VoxelWorld : MonoBehaviour
         public RegionBuildResult(Vector3Int r, WritableMeshData m) { RegionCoord = r; MeshData = m; }
     }
 
-    private SemaphoreSlim _semaphore;
-    // True when the last UpdateLoadedChunks hit the request budget — more batches are needed
+    private SemaphoreSlim           _regionSemaphore;
+    private CancellationTokenSource _regionCts = new();
     private bool _needsMoreRequests;
 
-    // Cancels all tasks that are waiting for the semaphore when the player moves.
-    // Tasks already executing are unaffected and complete normally.
-    private CancellationTokenSource _generationCts = new CancellationTokenSource();
-
-    // Background tasks signal here when cancelled so the main thread can clean _inFlight / _regionInFlight.
-    private readonly ConcurrentQueue<Vector3Int> _cancelledCoords       = new();
-    private readonly ConcurrentQueue<Vector3Int> _cancelledRegionCoords = new();
-
-    // Persistent scratch lists reused in UpdateLoadedChunks to avoid per-call allocations.
-    private readonly List<Vector3Int> _scratchUnloadC       = new();
-    private readonly List<Vector3Int> _scratchUnloadR       = new();
-    private readonly List<Vector3Int> _scratchEvictC        = new();
-    private readonly List<Vector3Int> _scratchEvictR        = new();
-    private readonly List<Vector3Int> _scratchRequestC      = new();
-    private readonly List<Vector3Int> _scratchRegionsToProc = new();
-    private readonly List<int>        _scratchCompletedIdx  = new();
-    private readonly List<int>        _scratchRemoveIdx     = new();
-    // Persistent distance-sort scratch — avoids per-frame Dictionary allocation in UpdateLoadedChunks.
-    private readonly Dictionary<Vector3Int, float> _scratchChunkDist  = new();
-    private readonly Dictionary<Vector3Int, float> _scratchRegionDist = new();
+    /// <summary>
+    /// Burst-native surface-height cache. Persists across batches within the same player
+    /// position, eliminating redundant FBM for boundary corners shared between neighbouring
+    /// chunks. Cleared whenever the player moves to a new chunk coord.
+    /// Key = ((long)worldX &lt;&lt; 32) | (uint)worldZ.
+    /// </summary>
+    private NativeParallelHashMap<long, int> _nativeSurfaceCache;
 
     // ── Unity ─────────────────────────────────────────────────────────────────
 
     private void Start()
     {
-        _semaphore = new SemaphoreSlim(maxConcurrentTasks, maxConcurrentTasks);
+        _regionSemaphore = new SemaphoreSlim(maxRegionTasks, maxRegionTasks);
+
+        // Capacity: covers the full generation radius + LOD rings with room to spare.
+        // NativeParallelHashMap does not auto-resize; TryAdd silently fails when full
+        // (cache miss, recompute — correct but slightly slower). 64K entries = ~1 MB.
+        _nativeSurfaceCache = new NativeParallelHashMap<long, int>(1 << 16, Allocator.Persistent);
+
         if (chunkMaterial == null)
             chunkMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
 
-        // Pre-seed change-detection state so the first Update() doesn't see
-        // everything as "changed" and wastefully cancel all jobs we're about to start.
         _lastLodLevels    = lodLevels;
         _lastViewDistance = viewDistance;
         _lastPlayerChunk  = WorldToChunkCoord(player != null ? player.position : Vector3.zero);
@@ -181,82 +234,108 @@ public class VoxelWorld : MonoBehaviour
 
     private void OnDestroy()
     {
-        _generationCts.Cancel();
-        _generationCts.Dispose();
-        // Complete and dispose all in-flight Burst jobs to avoid NativeArray leaks.
-        foreach (var pj in _pendingGenerationJobs)
+        // Cancel region tasks
+        _regionCts.Cancel();
+        _regionCts.Dispose();
+
+        // Complete and dispose all in-flight Burst pipelines
+        var batchesToDispose = new System.Collections.Generic.HashSet<BatchBuffer>();
+        for (int i = 0; i < _pipelines.Count; i++)
         {
-            pj.Handle.Complete();
-            pj.Blocks.Dispose();
+            var p = _pipelines[i];
+            p.Handle.Complete();
+            if (p.Batch != null)
+                batchesToDispose.Add(p.Batch);  // disposed below after loop
+            else if (p.Voxels.IsCreated)
+                p.Voxels.Dispose();
+            if (p.BuildMesh)
+            {
+                if (p.NeighbourSnapshots != null)
+                    foreach (var n in p.NeighbourSnapshots) n.Dispose();
+                if (p.MeshVerts.IsCreated) p.MeshVerts.Dispose();
+                if (p.MeshNorms.IsCreated) p.MeshNorms.Dispose();
+                if (p.MeshUVs.IsCreated)   p.MeshUVs.Dispose();
+                if (p.MeshTris.IsCreated)  p.MeshTris.Dispose();
+            }
         }
-        _pendingGenerationJobs.Clear();
+        foreach (var b in batchesToDispose)
+        {
+            if (b.Data.IsCreated)   b.Data.Dispose();
+            if (b.Coords.IsCreated) b.Coords.Dispose();
+        }
+        _pipelines.Clear();
+
+        // Dispose all stored VoxelChunks
+        foreach (var kvp in _chunks) kvp.Value.Dispose();
+        _chunks.Clear();
+
+        if (_nativeSurfaceCache.IsCreated) _nativeSurfaceCache.Dispose();
     }
 
     private void Update()
     {
-        // LOD must be checked first: it resets _lastPlayerChunk to a sentinel,
-        // and CheckPositionChanged must then overwrite it with the real value
-        // before UpdateLoadedChunks runs — preventing an Abs(int.MinValue) overflow.
-        bool lodChanged  = CheckLodSettingsChanged();
-        bool posChanged  = CheckPositionChanged();
+        Profiler.BeginSample("VoxelWorld.ChangeDetection");
+        bool lodChanged = CheckLodSettingsChanged();
+        bool posChanged = CheckPositionChanged();
 
-        // Remove cancelled task markers so those coords can be re-requested
         bool anyDrained = false;
-        while (_cancelledCoords.TryDequeue(out var cancelled))
-        {
-            _inFlight.Remove(cancelled);
-            anyDrained = true;
-        }
-        while (_cancelledRegionCoords.TryDequeue(out var cancelledR))
-        {
-            _regionInFlight.Remove(cancelledR);
-            anyDrained = true;
-        }
+        while (_cancelledRegions.TryDequeue(out var r))
+        { _regionInFlight.Remove(r); anyDrained = true; }
+        Profiler.EndSample();
 
         if (posChanged || lodChanged)
         {
-            // Cancel all tasks waiting for the semaphore — they're for the old position
-            // and would block new high-priority tasks for the current position.
-            _generationCts.Cancel();
-            _generationCts.Dispose();
-            _generationCts = new CancellationTokenSource();
+            Profiler.BeginSample("VoxelWorld.OnPositionChanged");
+            _regionCts.Cancel();
+            _regionCts.Dispose();
+            _regionCts = new CancellationTokenSource();
 
-            // Mark all pending Burst generation jobs as discarded.
-            // We cannot cancel them mid-execution; they will complete naturally
-            // and be disposed in ProcessCompletedGenerationJobs without enqueuing results.
-            for (int i = 0; i < _pendingGenerationJobs.Count; i++)
+            for (int i = 0; i < _pipelines.Count; i++)
             {
-                var pj = _pendingGenerationJobs[i];
-                pj.Discarded = true;
-                _pendingGenerationJobs[i] = pj;
+                var p = _pipelines[i]; p.Discarded = true; _pipelines[i] = p;
             }
 
-            if (posChanged) TerrainGenerator.ClearSurfaceCache();
-            UpdateLoadedChunks(posChanged || lodChanged);
+            if (posChanged)
+            {
+                TerrainGenerator.ClearSurfaceCache();
+                // NativeParallelHashMap is NOT cleared here: in-flight terrain jobs may still
+                // be reading from it. Terrain is deterministic so cached entries are always
+                // valid — old entries for distant columns are harmless wasted memory.
+            }
+            Profiler.EndSample();
+
+            Profiler.BeginSample("VoxelWorld.UpdateLoadedChunks(pos)");
+            UpdateLoadedChunks(true);
+            Profiler.EndSample();
         }
 
-        // Collect any Burst generation jobs that completed this frame and kick off
-        // their mesh builds (or enqueue data-only results) before ApplyReadyChunks.
-        ProcessCompletedGenerationJobs();
+        Profiler.BeginSample("VoxelWorld.ProcessCompletedPipelines");
+        bool pipelinesApplied = ProcessCompletedPipelines();
+        Profiler.EndSample();
 
-        bool chunksApplied  = ApplyReadyChunks();
+        Profiler.BeginSample("VoxelWorld.ApplyReadyRegions");
         bool regionsApplied = ApplyReadyRegions();
+        Profiler.EndSample();
 
-        if ((chunksApplied || regionsApplied || anyDrained) && _needsMoreRequests)
+        if ((pipelinesApplied || regionsApplied || anyDrained) && _needsMoreRequests)
+        {
+            Profiler.BeginSample("VoxelWorld.UpdateLoadedChunks(cascade)");
             UpdateLoadedChunks(false);
+            Profiler.EndSample();
+        }
 
-        // Submit all stored meshes to the renderer this frame.
-        // Unity automatically frustum-culls each mesh using its pre-computed bounds.
+        Profiler.BeginSample("VoxelWorld.DrawAllMeshes");
         DrawAllMeshes();
+        Profiler.EndSample();
     }
 
     private void OnGUI()
     {
-        GUI.Label(new Rect(10, 10, 400, 160),
+        GUI.Label(new Rect(10, 10, 400, 200),
             $"Desired chunks:  {_desiredCoords.Count}\n" +
+            $"Pending:         {_pendingCoords.Count}\n" +
             $"In-flight:       {_inFlight.Count}\n" +
-            $"Pending Burst:   {_pendingGenerationJobs.Count}\n" +
-            $"Ready queue:     {_readyQueue.Count}\n" +
+            $"Pipelines:       {_pipelines.Count}\n" +
             $"Chunk meshes:    {_chunkMeshes.Count}\n" +
             $"Player chunk:    {_lastPlayerChunk}\n" +
             $"ViewDist (aln):  {AlignedViewDistance}");
@@ -264,16 +343,15 @@ public class VoxelWorld : MonoBehaviour
 
     // ── Change detection ──────────────────────────────────────────────────────
 
-    private Vector3Int _lastPlayerChunk   = new Vector3Int(int.MaxValue, 0, 0);
-    private int        _lastLodLevels     = -1;
-    private int        _lastViewDistance  = -1;
+    private Vector3Int _lastPlayerChunk  = new Vector3Int(int.MaxValue, 0, 0);
+    private int        _lastLodLevels    = -1;
+    private int        _lastViewDistance = -1;
 
     private bool CheckLodSettingsChanged()
     {
         if (lodLevels == _lastLodLevels && viewDistance == _lastViewDistance) return false;
         _lastLodLevels    = lodLevels;
         _lastViewDistance = viewDistance;
-        // Force full rebuild by resetting the player chunk tracker
         _lastPlayerChunk  = new Vector3Int(int.MaxValue, 0, 0);
         return true;
     }
@@ -292,29 +370,18 @@ public class VoxelWorld : MonoBehaviour
     {
         if (positionChanged)
         {
-            // Rebuild desired sets
+            Profiler.BeginSample("ULC.BuildDesiredSets");
             _desiredCoords.Clear();
             _desiredRegions.Clear();
-            int maxR = MaxRadius;
-            int vd   = AlignedViewDistance;
+            int vd = AlignedViewDistance;
 
-            // ── Pass 1: LOD 0 zone — iterate chunk offsets in [-vd+1, vd-1] ──────
-            // Matches the original condition: Mathf.Max(|x|, |z|) < AlignedViewDistance.
-            // No region logic needed here; the entire square is LOD 0 individual chunks.
+            // LOD 0 zone
             for (int x = -(vd - 1); x <= vd - 1; x++)
             for (int z = -(vd - 1); z <= vd - 1; z++)
-            {
-                int ax = _lastPlayerChunk.x + x;
-                int az = _lastPlayerChunk.z + z;
-                for (int y = 0; y < verticalChunks; y++)
-                    _desiredCoords.Add(new Vector3Int(ax, y, az));
-            }
+            for (int y = 0; y < verticalChunks; y++)
+                _desiredCoords.Add(new Vector3Int(_lastPlayerChunk.x + x, y, _lastPlayerChunk.z + z));
 
-            // ── Pass 2: LOD 1+ zones — one ring per LOD level ────────────────────
-            // At LOD level L: regions are (1<<L)×(1<<L) chunks, covering chunk Chebyshev
-            // distance [vd*(1<<(L-1)), vd*(1<<L)). AlignedViewDistance is a multiple of
-            // (1<<lodLevels) so all zone boundaries land exactly on region edges —
-            // no region ever straddles the LOD 0/1 boundary (no stitching needed).
+            // LOD 1+ rings
             for (int lod = 1; lod <= lodLevels; lod++)
             {
                 int hSize       = 1 << lod;
@@ -333,114 +400,136 @@ public class VoxelWorld : MonoBehaviour
                     int nearestZ    = Mathf.Clamp(_lastPlayerChunk.z, baseChunk.z, baseChunk.z + hSize - 1);
                     int chebDist    = Mathf.Max(Mathf.Abs(nearestX - _lastPlayerChunk.x),
                                                 Mathf.Abs(nearestZ - _lastPlayerChunk.z));
-
-                    if (chebDist >= outerRadius) continue; // beyond this LOD's outer edge
-                    if (chebDist <  innerRadius) continue; // inner edge — closer LOD covers it
-
+                    if (chebDist >= outerRadius || chebDist < innerRadius) continue;
                     _desiredRegions.Add(regionCoord);
                 }
             }
+            Profiler.EndSample();
 
+            Profiler.BeginSample("ULC.UnloadMeshes");
             // Unload out-of-range chunk meshes
             _scratchUnloadC.Clear();
             foreach (var c in _chunkMeshes.Keys)
                 if (!_desiredCoords.Contains(c)) _scratchUnloadC.Add(c);
-            foreach (var c in _scratchUnloadC) UnloadChunk(c);
+            foreach (var c in _scratchUnloadC) UnloadChunkMesh(c);
 
             // Unload out-of-range region meshes
             _scratchUnloadR.Clear();
             foreach (var r in _regionMeshes.Keys)
                 if (!_desiredRegions.Contains(r)) _scratchUnloadR.Add(r);
-            foreach (var r in _scratchUnloadR) UnloadRegion(r);
+            foreach (var r in _scratchUnloadR) UnloadRegionMesh(r);
+            Profiler.EndSample();
 
-            // Evict chunk data
+            Profiler.BeginSample("ULC.EvictData");
+            // Evict chunk data (and dispose NativeArrays)
             int evictR = MaxRadius + 2;
             _scratchEvictC.Clear();
             foreach (var c in _chunks.Keys)
                 if (Mathf.Abs(c.x - _lastPlayerChunk.x) > evictR ||
                     Mathf.Abs(c.z - _lastPlayerChunk.z) > evictR) _scratchEvictC.Add(c);
-            foreach (var c in _scratchEvictC) _chunks.Remove(c);
+            foreach (var c in _scratchEvictC)
+            { _chunks[c].Dispose(); _chunks.Remove(c); }
 
             // Evict region data
             _scratchEvictR.Clear();
             foreach (var r in _regions.Keys)
                 if (!_desiredRegions.Contains(r)) _scratchEvictR.Add(r);
             foreach (var r in _scratchEvictR) _regions.Remove(r);
-        }
+            Profiler.EndSample();
 
-        // ── Request LOD 0 chunks ──────────────────────────────────────────────
-        _scratchRequestC.Clear();
-        foreach (var coord in _desiredCoords)
-            if (!_chunkMeshes.ContainsKey(coord) && !_inFlight.Contains(coord))
-                _scratchRequestC.Add(coord);
-        var toRequestC = _scratchRequestC;
+            // Rebuild pending set: desired coords that still need a LOD0 mesh and aren't in-flight.
+            // Done once per position change; maintained incrementally by SubmitSubBatch and
+            // ProcessCompletedPipelines, so cascade calls never re-iterate _desiredCoords.
+            _pendingCoords.Clear();
+            foreach (var c in _desiredCoords)
+                if (!_chunkMeshes.ContainsKey(c) && !_inFlight.Contains(c))
+                    _pendingCoords.Add(c);
+        }
 
         var playerPos = player != null ? player.position : Vector3.zero;
 
-        // Pre-compute squared distances once; Sort's comparator would otherwise call
-        // ChunkCenterWorld on both sides of every comparison — O(n log n) redundant calls.
-        _scratchChunkDist.Clear();
-        foreach (var c in toRequestC)
-            _scratchChunkDist[c] = ChunkCenterWorld(c).sqrMagnitude_To(playerPos);
-        toRequestC.Sort((a, b) => _scratchChunkDist[a].CompareTo(_scratchChunkDist[b]));
+        // ── Request LOD 0 chunks ──────────────────────────────────────────────
 
-        // Limit submissions per call so the closest chunks always get priority.
-        // toRequestC is already distance-sorted, so breaking early drops far chunks.
-        int lod0Budget = Mathf.Max(4, maxRequestsPerUpdate / 2);
+        // Compute availability first — if pipeline slots are full there is nothing to submit
+        // and we can skip the entire HashSet iteration + sort.
+        int lod0Budget    = Mathf.Max(4, maxRequestsPerUpdate / 2);
+        int lod0Avail     = Mathf.Min(lod0Budget, Mathf.Max(0, maxPipelinesInFlight - _pipelines.Count));
         int lod0Submitted = 0;
 
-        foreach (var coord in toRequestC)
+        Profiler.BeginSample("ULC.GatherAndSortLOD0");
+        _scratchRequestC.Clear();
+        if (lod0Avail > 0)
         {
-            if (lod0Submitted >= lod0Budget) break;
-            RequestChunk(coord, buildMesh: true);
-            lod0Submitted++;
+            Profiler.BeginSample("LOD0.Gather");
+            _scratchChunkSort.Clear();
+            foreach (var coord in _pendingCoords)
+                _scratchChunkSort.Add((ChunkCenterWorld(coord).sqrMagnitude_To(playerPos), coord));
+            Profiler.EndSample();
+
+            if (_scratchChunkSort.Count > 1)
+            {
+                Profiler.BeginSample("LOD0.Sort");
+                _scratchChunkSort.Sort((a, b) => a.dist.CompareTo(b.dist));
+                Profiler.EndSample();
+            }
+
+            Profiler.BeginSample("LOD0.Extract");
+            foreach (var (_, coord) in _scratchChunkSort)
+                _scratchRequestC.Add(coord);
+            Profiler.EndSample();
+        }
+        Profiler.EndSample();
+
+        int lod0Count  = Mathf.Min(lod0Avail, _scratchRequestC.Count);
+        lod0Submitted  = lod0Count;
+
+        if (lod0Count > 0)
+        {
+            // Trim to budget (list is already sorted closest-first, keep first lod0Count)
+            if (_scratchRequestC.Count > lod0Count)
+                _scratchRequestC.RemoveRange(lod0Count, _scratchRequestC.Count - lod0Count);
+            Profiler.BeginSample("ULC.SubmitLOD0Batch");
+            SubmitChunkBatch(_scratchRequestC, buildMesh: true);
+            Profiler.EndSample();
         }
 
-        // ── Process desired regions (sorted by distance) ──────────────────────────
-        _scratchRegionsToProc.Clear();
-        var regionsToProcess = _scratchRegionsToProc;
-        foreach (var regionCoord in _desiredRegions)
+        // ── Process desired regions ───────────────────────────────────────────
+        Profiler.BeginSample("ULC.GatherAndSortRegions");
+        _scratchRegions.Clear();
+        foreach (var r in _desiredRegions)
         {
-            // Step is invariant for a given regionCoord (1 << regionCoord.y),
-            // so any existing mesh is already at the correct step.
-            if (_regionInFlight.Contains(regionCoord)) continue;
-            if (_regionMeshes.ContainsKey(regionCoord)) continue;
-
-            regionsToProcess.Add(regionCoord);
+            if (_regionInFlight.Contains(r) || _regionMeshes.ContainsKey(r)) continue;
+            _scratchRegions.Add(r);
         }
 
-        // Nearest regions first — pre-compute distances to avoid redundant calls in Sort.
         _scratchRegionDist.Clear();
-        foreach (var r in regionsToProcess)
+        foreach (var r in _scratchRegions)
             _scratchRegionDist[r] = RegionCenterWorld(r).sqrMagnitude_To(playerPos);
-        regionsToProcess.Sort((a, b) => _scratchRegionDist[a].CompareTo(_scratchRegionDist[b]));
+        _scratchRegions.Sort((a, b) => _scratchRegionDist[a].CompareTo(_scratchRegionDist[b]));
+        Profiler.EndSample();
 
-        // Region data requests use the other half of the budget.
-        // Without a cap, a single UpdateLoadedChunks call could submit 50 regions × 48 chunks
-        // = 2400 data tasks, starving LOD 0 mesh tasks of semaphore slots.
-        int regionDataBudget = Mathf.Max(4, maxRequestsPerUpdate / 2);
-        int regionDataSubmitted = 0;
+        int regionBudget    = Mathf.Max(4, maxRequestsPerUpdate / 2);
+        int regionSubmitted = 0;
 
-        foreach (var regionCoord in regionsToProcess)
+        // Collect data-only chunk requests from all regions, then submit as one batch
+        _scratchDataCoords.Clear();
+
+        Profiler.BeginSample("ULC.FillRegionData");
+        foreach (var regionCoord in _scratchRegions)
         {
-            int hSize = 1 << regionCoord.y; // chunks per region side at this LOD level
+            int hSize = 1 << regionCoord.y;
 
             if (!_regions.TryGetValue(regionCoord, out var region))
             {
-                // First visit: create region and immediately feed all already-available chunk data.
                 region = new RegionData(verticalChunks, hSize);
                 _regions[regionCoord] = region;
             }
-            else if (regionDataSubmitted >= regionDataBudget)
+            else if (regionSubmitted >= regionBudget)
             {
-                // Return visit with no budget: skip the inner chunk loop.
-                // TryFeedChunkIntoRegion (called from ApplyReadyChunks) handles feeding as
-                // data tasks complete, and triggers RequestRegionMesh when the region is full.
                 if (region.IsComplete) RequestRegionMesh(regionCoord, region);
                 continue;
             }
 
-            // Feed already-available chunk data; request the rest (within budget)
             var baseChunk = RegionBaseChunkCoord(regionCoord);
             for (int lcx = 0; lcx < hSize; lcx++)
             for (int lcy = 0; lcy < verticalChunks; lcy++)
@@ -449,265 +538,322 @@ public class VoxelWorld : MonoBehaviour
                 if (region.HasChunk(lcx, lcy, lcz)) continue;
                 var chunkCoord = new Vector3Int(baseChunk.x + lcx, lcy, baseChunk.z + lcz);
                 if (_chunks.TryGetValue(chunkCoord, out var existing))
-                    region.SetChunk(lcx, lcy, lcz, existing);
-                else if (!_inFlight.Contains(chunkCoord) && regionDataSubmitted < regionDataBudget)
                 {
-                    RequestChunk(chunkCoord, buildMesh: false);
-                    regionDataSubmitted++;
+                    var bytes = new byte[VoxelChunk.VoxelCount];
+                    existing.CopyTo(bytes);
+                    region.SetChunk(lcx, lcy, lcz, bytes);
+                }
+                else if (!_inFlight.Contains(chunkCoord) && regionSubmitted < regionBudget
+                         && !_scratchDataCoords.Contains(chunkCoord))
+                {
+                    _scratchDataCoords.Add(chunkCoord);
+                    regionSubmitted++;
                 }
             }
 
-            if (region.IsComplete)
-                RequestRegionMesh(regionCoord, region);
+            if (region.IsComplete) RequestRegionMesh(regionCoord, region);
+        }
+        Profiler.EndSample();
+
+        // Submit all data-only region chunks as a single batch
+        if (_scratchDataCoords.Count > 0)
+        {
+            Profiler.BeginSample("ULC.SubmitRegionDataBatch");
+            SubmitChunkBatch(_scratchDataCoords, buildMesh: false);
+            Profiler.EndSample();
         }
 
-        // If either budget was fully spent, there are likely more items waiting.
-        // Update() will call UpdateLoadedChunks(false) again once tasks complete.
-        _needsMoreRequests = (lod0Submitted >= lod0Budget) || (regionDataSubmitted >= regionDataBudget);
+        _needsMoreRequests = (lod0Submitted >= lod0Budget) || (regionSubmitted >= regionBudget);
     }
 
-    // ── LOD 0 chunk tasks ─────────────────────────────────────────────────────
-
-    private void RequestChunk(Vector3Int coord, bool buildMesh)
-    {
-        _inFlight.Add(coord);
-        var existing = GetChunk(coord);
-
-        if (existing != null)
-        {
-            // Data already present — skip generation, build mesh directly if needed.
-            if (!buildMesh)
-            {
-                // Re-enqueue so ApplyReadyChunks can call TryFeedChunkIntoRegion.
-                _inFlight.Remove(coord);
-                _readyQueue.Enqueue(new ChunkBuildResult(coord, existing, null));
-                return;
-            }
-
-            var neighbours = ChunkRenderer.FetchNeighbours(coord, GetChunk);
-            var token = _generationCts.Token;
-            Task.Run(async () =>
-            {
-                try { await _semaphore.WaitAsync(token); }
-                catch (OperationCanceledException) { _cancelledCoords.Enqueue(coord); return; }
-                try
-                {
-                    var mesh = ChunkRenderer.BuildMeshData(existing, neighbours, 0);
-                    _readyQueue.Enqueue(new ChunkBuildResult(coord, existing, mesh));
-                }
-                finally { _semaphore.Release(); }
-            });
-            return;
-        }
-
-        // Schedule a Burst-compiled terrain generation job.
-        // Jobs are scheduled on the main thread and run on Unity's job worker threads.
-        // ProcessCompletedGenerationJobs() polls IsCompleted each Update.
-        int size   = PaletteChunk.Size;
-        var blocks = new NativeArray<byte>(size * size * size, Allocator.Persistent);
-        var job    = new GenerateChunkJob
-        {
-            Settings   = GetTerrainSettings(),
-            ChunkCoord = new int3(coord.x, coord.y, coord.z),
-            LowDetail  = !buildMesh,
-            Blocks     = blocks,
-        };
-        var handle     = job.Schedule();
-        var neighbours2 = buildMesh ? ChunkRenderer.FetchNeighbours(coord, GetChunk) : null;
-
-        _pendingGenerationJobs.Add(new PendingGenerationJob
-        {
-            Coord      = coord,
-            Handle     = handle,
-            Blocks     = blocks,
-            BuildMesh  = buildMesh,
-            Neighbours = neighbours2,
-            Discarded  = false,
-        });
-    }
-
-    // Returns true if any new GameObjects were added to the scene this frame.
-    private bool ApplyReadyChunks()
-    {
-        int applied = 0;
-        bool anyProcessed = false;
-        while (applied < maxApplyPerFrame && _readyQueue.TryDequeue(out var result))
-        {
-            anyProcessed = true; // any dequeue frees an _inFlight slot → may unblock pending requests
-            _inFlight.Remove(result.Coord);
-            _chunks[result.Coord] = result.Chunk;
-
-            // LOD 0 mesh — drawn via Graphics.DrawMesh each frame.
-            // Store null as a sentinel for empty chunks (no visible faces) so they are
-            // not re-requested on every UpdateLoadedChunks call.  DrawAllMeshes already
-            // skips null entries.  Coords NOT in _desiredCoords are discarded outright.
-            if (_desiredCoords.Contains(result.Coord))
-            {
-                if (!_chunkMeshes.ContainsKey(result.Coord))
-                {
-                    var mesh = result.MeshData != null ? ChunkRenderer.CreateMesh(result.MeshData) : null;
-                    _chunkMeshes[result.Coord] = mesh; // null = empty chunk sentinel
-                }
-                else
-                {
-                    result.MeshData?.Discard();
-                }
-            }
-            else
-            {
-                result.MeshData?.Discard();
-            }
-
-            // Always feed this chunk's data into its region — boundary chunks (at exactly
-            // viewDistance) are processed as LOD 0 above but also belong to an adjacent region.
-            // Without this, the region stays incomplete until the next UpdateLoadedChunks call.
-            TryFeedChunkIntoRegion(result.Coord, result.Chunk);
-
-            applied++;
-        }
-        return anyProcessed;
-    }
-
-    // ── Burst job completion ──────────────────────────────────────────────────
+    // ── LOD 0 chunk pipeline ──────────────────────────────────────────────────
 
     /// <summary>
-    /// Called every Update. Drains any Burst generation jobs whose JobHandle
-    /// is now complete, builds the PaletteChunk from the NativeArray result,
-    /// and either enqueues a data-only result or kicks off an async mesh build.
-    /// Discarded jobs (player moved) are disposed without enqueueing.
-    ///
-    /// Completed jobs are sorted closest-first before processing so the per-frame
-    /// budget always goes to the nearest chunks, not whichever happened to finish last.
+    /// Submits coords in sub-batches of <see cref="terrainBatchSize"/>.
+    /// Each sub-batch gets one GenerateChunksBatchJob (IJobParallelFor) for terrain, then
+    /// individual BuildChunkMeshJob instances chained to that sub-batch's terrain handle.
+    /// Splitting prevents head-of-line blocking: mesh jobs for sub-batch 0 can start as soon
+    /// as its terrain finishes, while sub-batch 1's terrain is still in flight.
     /// </summary>
-    private void ProcessCompletedGenerationJobs()
+    private void SubmitChunkBatch(List<Vector3Int> coords, bool buildMesh)
     {
-        // Collect indices of all completed jobs.
-        _scratchCompletedIdx.Clear();
-        for (int i = 0; i < _pendingGenerationJobs.Count; i++)
-            if (_pendingGenerationJobs[i].Handle.IsCompleted)
-                _scratchCompletedIdx.Add(i);
+        if (coords.Count == 0) return;
 
-        if (_scratchCompletedIdx.Count == 0) return;
+        int n         = coords.Count;
+        int subSize   = math.max(1, terrainBatchSize);
+        var settings  = GetTerrainSettings();
 
-        // Sort: non-discarded closest-first so the budget always goes to the nearest chunks.
-        // Discarded jobs are partitioned to the end — they are always drained (no budget cost).
-        var pc = _lastPlayerChunk;
-        _scratchCompletedIdx.Sort((a, b) =>
+        for (int start = 0; start < n; start += subSize)
         {
-            var ja = _pendingGenerationJobs[a];
-            var jb = _pendingGenerationJobs[b];
-            if (ja.Discarded != jb.Discarded) return ja.Discarded ? 1 : -1; // discarded last
-            int da = Mathf.Max(Mathf.Abs(ja.Coord.x - pc.x), Mathf.Abs(ja.Coord.z - pc.z));
-            int db = Mathf.Max(Mathf.Abs(jb.Coord.x - pc.x), Mathf.Abs(jb.Coord.z - pc.z));
-            return da.CompareTo(db);
-        });
+            int subCount = math.min(subSize, n - start);
+            SubmitSubBatch(coords, start, subCount, buildMesh, settings);
+        }
 
-        int tasksBudget = maxApplyPerFrame;
-        _scratchRemoveIdx.Clear();
+        JobHandle.ScheduleBatchedJobs();
+    }
 
-        foreach (int idx in _scratchCompletedIdx)
+    private void SubmitSubBatch(List<Vector3Int> coords, int offset, int count,
+                                bool buildMesh, TerrainSettings settings)
+    {
+        var batch = new BatchBuffer(count); // allocates batch.Data and batch.Coords as Persistent
+
+        for (int i = 0; i < count; i++)
         {
-            var pj = _pendingGenerationJobs[idx];
+            _inFlight.Add(coords[offset + i]);
+            _pendingCoords.Remove(coords[offset + i]);
+            batch.Coords[i] = new int3(coords[offset + i].x, coords[offset + i].y, coords[offset + i].z);
+        }
 
-            // Discarded jobs are cheap (Dispose + enqueue) — always drain regardless of budget.
-            // Only non-discarded jobs that kick off background tasks count against the budget.
-            if (!pj.Discarded && tasksBudget <= 0) continue;
+        var terrainJob = new GenerateChunksBatchJob
+        {
+            Settings           = settings,
+            Coords             = batch.Coords,
+            LowDetail          = !buildMesh,
+            AllBlocks          = batch.Data,
+            SurfaceCache       = _nativeSurfaceCache,
+            SurfaceCacheWriter = _nativeSurfaceCache.AsParallelWriter(),
+        };
+        var terrainHandle = terrainJob.Schedule(count, 1);
+        // batch.Coords is Persistent — disposed by BatchBuffer.Release() when all pipelines complete
 
-            pj.Handle.Complete(); // Required even when IsCompleted — finalises the job
-            _scratchRemoveIdx.Add(idx);
+        for (int i = 0; i < count; i++)
+        {
+            var coord  = coords[offset + i];
+            var voxels = batch.Data.GetSubArray(i * VoxelChunk.VoxelCount, VoxelChunk.VoxelCount);
 
-            if (pj.Discarded)
+            if (!buildMesh)
             {
-                pj.Blocks.Dispose();
-                _cancelledCoords.Enqueue(pj.Coord); // cleans up _inFlight in Update's drain loop
-                continue;
-            }
-
-            tasksBudget--;
-
-            // Rent a pooled byte[4096] from ArrayPool to avoid a managed allocation per job.
-            // CopyTo is equivalent to ToArray() but writes into the pre-existing buffer.
-            // Dispose NativeArray immediately to free unmanaged memory.
-            var blocksCopy = ArrayPool<byte>.Shared.Rent(PaletteChunk.Size * PaletteChunk.Size * PaletteChunk.Size);
-            pj.Blocks.CopyTo(blocksCopy);
-            pj.Blocks.Dispose();
-
-            // _inFlight cleanup is intentionally deferred to ApplyReadyChunks so the coord
-            // stays in _inFlight while the background task is running, preventing duplicate
-            // generation requests for the same coord.
-
-            if (!pj.BuildMesh)
-            {
-                var dataCoord  = pj.Coord;
-                var dataBlocks = blocksCopy;
-                Task.Run(() =>
+                _pipelines.Add(new ChunkPipeline
                 {
-                    try
-                    {
-                        var chunk = BuildPaletteChunkFromBlocks(dataBlocks);
-                        _readyQueue.Enqueue(new ChunkBuildResult(dataCoord, chunk, null));
-                    }
-                    catch (Exception e) { UnityEngine.Debug.LogError($"[VoxelWorld] Data build {dataCoord}: {e.Message}"); _cancelledCoords.Enqueue(dataCoord); }
-                    finally { ArrayPool<byte>.Shared.Return(dataBlocks); }
+                    Coord     = coord,
+                    Handle    = terrainHandle,
+                    Voxels    = voxels,
+                    Batch     = batch,
+                    BuildMesh = false,
                 });
                 continue;
             }
 
-            // Kick off chunk build + mesh build on a background thread (semaphore-limited, cancellable).
-            var coord      = pj.Coord;
-            var neighbours = pj.Neighbours;
-            var token      = _generationCts.Token;
-            var jobBlocks  = blocksCopy;
-            Task.Run(async () =>
+            var snapshots = SnapshotNeighbours(coord, out int neighbourMask);
+            var verts = new NativeList<float3>(4096, Allocator.Persistent);
+            var norms = new NativeList<float3>(4096, Allocator.Persistent);
+            var uvs   = new NativeList<float2>(4096, Allocator.Persistent);
+            var tris  = new NativeList<int>   (6144, Allocator.Persistent);
+
+            var meshJob = new BuildChunkMeshJob
             {
-                // BuildPaletteChunkFromBlocks uses jobBlocks then returns it to the pool via finally.
-                // The finally always runs — even when catch does an early return — so one Return is enough.
-                PaletteChunk chunk;
-                try { chunk = BuildPaletteChunkFromBlocks(jobBlocks); }
-                catch (Exception e) { UnityEngine.Debug.LogError($"[VoxelWorld] Palette build {coord}: {e.Message}"); _cancelledCoords.Enqueue(coord); return; }
-                finally { ArrayPool<byte>.Shared.Return(jobBlocks); }
+                Voxels        = voxels,
+                N_PX          = snapshots[0], N_NX = snapshots[1],
+                N_PY          = snapshots[2], N_NY = snapshots[3],
+                N_PZ          = snapshots[4], N_NZ = snapshots[5],
+                NeighbourMask = neighbourMask,
+                Step          = 1,
+                Vertices      = verts,
+                Normals       = norms,
+                UVs           = uvs,
+                Triangles     = tris,
+            };
+            var meshHandle = meshJob.Schedule(terrainHandle);
 
-                try { await _semaphore.WaitAsync(token); }
-                catch (OperationCanceledException) { _cancelledCoords.Enqueue(coord); return; }
-
-                try
-                {
-                    var mesh = ChunkRenderer.BuildMeshData(chunk, neighbours, 0);
-                    _readyQueue.Enqueue(new ChunkBuildResult(coord, chunk, mesh));
-                }
-                catch (Exception e) { UnityEngine.Debug.LogError($"[VoxelWorld] Mesh build {coord}: {e.Message}"); _cancelledCoords.Enqueue(coord); }
-                finally { _semaphore.Release(); }
+            _pipelines.Add(new ChunkPipeline
+            {
+                Coord              = coord,
+                Handle             = meshHandle,
+                Voxels             = voxels,
+                Batch              = batch,
+                NeighbourSnapshots = snapshots,
+                MeshVerts          = verts,
+                MeshNorms          = norms,
+                MeshUVs            = uvs,
+                MeshTris           = tris,
+                BuildMesh          = true,
             });
         }
-
-        // Remove processed entries. Sort descending so higher indices are removed first,
-        // keeping all lower indices valid throughout.
-        _scratchRemoveIdx.Sort((a, b) => b.CompareTo(a));
-        foreach (int idx in _scratchRemoveIdx)
-            _pendingGenerationJobs.RemoveAt(idx);
     }
 
-    private static PaletteChunk BuildPaletteChunkFromBlocks(byte[] blocks)
+    /// <summary>
+    /// Polls all pending pipelines. Completed ones are applied directly (no ConcurrentQueue needed).
+    /// Discarded pipelines are drained without creating meshes.
+    /// Budget (maxApplyPerFrame) applied only to non-discarded mesh-building pipelines.
+    /// Returns true if any pipeline was processed (used to trigger UpdateLoadedChunks cascading).
+    /// </summary>
+    private bool ProcessCompletedPipelines()
     {
-        var chunk = new PaletteChunk();
-        // Pre-seed all terrain types so GrowIfNeeded never repacks 4096 voxels mid-fill.
-        chunk.SeedPalette(BlockType.Stone, BlockType.Dirt, BlockType.Grass,
-                          BlockType.Sand,  BlockType.Water, BlockType.Snow);
-        // BulkLoad is ~3× faster than 4096 individual SetBlock calls: skips the
-        // palette-registration branch and GrowIfNeeded check on every voxel.
-        chunk.BulkLoad(blocks);
-        return chunk;
+        _scratchCompleted.Clear();
+        for (int i = 0; i < _pipelines.Count; i++)
+            if (_pipelines[i].Handle.IsCompleted)
+                _scratchCompleted.Add(i);
+
+        if (_scratchCompleted.Count == 0) return false;
+
+        // Sort: non-discarded closest-first; discarded last (always drained without budget cost)
+        var pc = _lastPlayerChunk;
+        _scratchCompleted.Sort((a, b) =>
+        {
+            var pa = _pipelines[a]; var pb = _pipelines[b];
+            if (pa.Discarded != pb.Discarded) return pa.Discarded ? 1 : -1;
+            int da = Mathf.Max(Mathf.Abs(pa.Coord.x - pc.x), Mathf.Abs(pa.Coord.z - pc.z));
+            int db = Mathf.Max(Mathf.Abs(pb.Coord.x - pc.x), Mathf.Abs(pb.Coord.z - pc.z));
+            return da.CompareTo(db);
+        });
+
+        int  budget    = maxApplyPerFrame;
+        bool anyApplied = false;
+        _scratchRemove.Clear();
+
+        foreach (int idx in _scratchCompleted)
+        {
+            var p = _pipelines[idx];
+            if (!p.Discarded && p.BuildMesh && budget <= 0) continue;
+
+            p.Handle.Complete();
+            _scratchRemove.Add(idx);
+
+            if (p.Discarded)
+            {
+                // Free all native memory, remove from _inFlight
+                if (p.Batch != null) p.Batch.Release(); else if (p.Voxels.IsCreated) p.Voxels.Dispose();
+                DisposeMeshLists(ref p);
+                _inFlight.Remove(p.Coord);
+                // Coord may still be desired under the new player position — re-queue it.
+                if (p.BuildMesh && _desiredCoords.Contains(p.Coord) && !_chunkMeshes.ContainsKey(p.Coord))
+                    _pendingCoords.Add(p.Coord);
+                continue;
+            }
+
+            if (p.BuildMesh) budget--;
+
+            // Copy voxels to an owned NativeArray for VoxelChunk storage.
+            // p.Voxels may be a sub-array view into a BatchBuffer; copying ensures VoxelChunk
+            // lifetime is independent of the batch buffer.
+            var ownedVoxels = new NativeArray<byte>(VoxelChunk.VoxelCount, Allocator.Persistent,
+                                                     NativeArrayOptions.UninitializedMemory);
+            NativeArray<byte>.Copy(p.Voxels, ownedVoxels, VoxelChunk.VoxelCount);
+
+            // Release batch reference (or dispose solo-owned voxels)
+            if (p.Batch != null) p.Batch.Release(); else if (p.Voxels.IsCreated) p.Voxels.Dispose();
+
+            var chunk = new VoxelChunk { Blocks = ownedVoxels };
+            if (_chunks.TryGetValue(p.Coord, out var old)) old.Dispose();
+            _chunks[p.Coord] = chunk;
+
+            // Dispose neighbour snapshots
+            if (p.NeighbourSnapshots != null)
+                foreach (var n in p.NeighbourSnapshots) n.Dispose();
+
+            // Apply mesh (or null sentinel for empty/data-only)
+            if (p.BuildMesh && _desiredCoords.Contains(p.Coord) && !_chunkMeshes.ContainsKey(p.Coord))
+                _chunkMeshes[p.Coord] = CreateMeshFromLists(ref p);
+            else
+                DisposeMeshLists(ref p);
+
+            _inFlight.Remove(p.Coord);
+            TryFeedChunkIntoRegion(p.Coord, chunk);
+
+            _needsMoreRequests = true;
+            anyApplied = true;
+        }
+
+        // Remove processed entries (descending so lower indices remain valid)
+        _scratchRemove.Sort((a, b) => b.CompareTo(a));
+        foreach (int idx in _scratchRemove)
+            _pipelines.RemoveAt(idx);
+
+        return anyApplied;
     }
 
-    private void TryFeedChunkIntoRegion(Vector3Int coord, PaletteChunk chunk)
+    private static Mesh CreateMeshFromLists(ref ChunkPipeline p)
     {
-        // Determine which LOD level zone this chunk sits in by Chebyshev distance.
+        if (!p.MeshVerts.IsCreated || p.MeshVerts.Length == 0)
+        {
+            DisposeMeshLists(ref p);
+            return null; // empty chunk sentinel
+        }
+
+        bool use32 = p.MeshVerts.Length > ushort.MaxValue;
+        var  mda   = Mesh.AllocateWritableMeshData(1);
+        var  md    = mda[0];
+
+        md.SetVertexBufferParams(p.MeshVerts.Length,
+            new VertexAttributeDescriptor(VertexAttribute.Position,  VertexAttributeFormat.Float32, 3, stream: 0),
+            new VertexAttributeDescriptor(VertexAttribute.Normal,    VertexAttributeFormat.Float32, 3, stream: 1),
+            new VertexAttributeDescriptor(VertexAttribute.TexCoord0, VertexAttributeFormat.Float32, 2, stream: 2));
+        md.SetIndexBufferParams(p.MeshTris.Length, use32 ? IndexFormat.UInt32 : IndexFormat.UInt16);
+
+        // NativeList.AsArray() is a zero-copy view; CopyFrom is a native memcpy
+        md.GetVertexData<float3>(0).CopyFrom(p.MeshVerts.AsArray());
+        md.GetVertexData<float3>(1).CopyFrom(p.MeshNorms.AsArray());
+        md.GetVertexData<float2>(2).CopyFrom(p.MeshUVs.AsArray());
+
+        if (use32)
+        {
+            md.GetIndexData<int>().CopyFrom(p.MeshTris.AsArray());
+        }
+        else
+        {
+            var idx = md.GetIndexData<ushort>();
+            for (int i = 0; i < p.MeshTris.Length; i++) idx[i] = (ushort)p.MeshTris[i];
+        }
+
+        md.subMeshCount = 1;
+        md.SetSubMesh(0, new SubMeshDescriptor(0, p.MeshTris.Length),
+            MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+
+        var mesh = new Mesh { name = "Chunk" };
+        Mesh.ApplyAndDisposeWritableMeshData(mda, mesh,
+            MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+
+        int s = VoxelChunk.Size;
+        mesh.bounds = new Bounds(new Vector3(s * .5f, s * .5f, s * .5f), new Vector3(s, s, s));
+
+        DisposeMeshLists(ref p);
+        return mesh;
+    }
+
+    private static void DisposeMeshLists(ref ChunkPipeline p)
+    {
+        if (!p.BuildMesh) return;
+        if (p.MeshVerts.IsCreated) p.MeshVerts.Dispose();
+        if (p.MeshNorms.IsCreated) p.MeshNorms.Dispose();
+        if (p.MeshUVs.IsCreated)   p.MeshUVs.Dispose();
+        if (p.MeshTris.IsCreated)  p.MeshTris.Dispose();
+    }
+
+    // ── Neighbour snapshots ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Copies the six neighbour VoxelChunks into Persistent NativeArrays for the mesh job.
+    /// Unloaded neighbours produce zeroed arrays (all Air). Returns bit-mask of loaded neighbours.
+    /// </summary>
+    private NativeArray<byte>[] SnapshotNeighbours(Vector3Int coord, out int loadedMask)
+    {
+        var snapshots = new NativeArray<byte>[6];
+        loadedMask = 0;
+        for (int i = 0; i < 6; i++)
+        {
+            var n = new NativeArray<byte>(VoxelChunk.VoxelCount, Allocator.Persistent,
+                                           NativeArrayOptions.ClearMemory);
+            var nc = coord + MeshBuilder.NeighbourDirs[i];
+            if (_chunks.TryGetValue(nc, out var neighbour))
+            {
+                neighbour.Blocks.CopyTo(n); // native memcpy
+                loadedMask |= (1 << i);
+            }
+            snapshots[i] = n;
+        }
+        return snapshots;
+    }
+
+    // ── Region feeding ────────────────────────────────────────────────────────
+
+    private void TryFeedChunkIntoRegion(Vector3Int coord, VoxelChunk chunk)
+    {
         int dist     = Mathf.Max(Mathf.Abs(coord.x - _lastPlayerChunk.x),
                                   Mathf.Abs(coord.z - _lastPlayerChunk.z));
         int lod      = 0;
         int boundary = AlignedViewDistance;
         while (lod < lodLevels && dist >= boundary) { lod++; boundary *= 2; }
-        if (lod == 0) return; // LOD 0 chunk — not part of any region
+        if (lod == 0) return;
 
         var regionCoord = ChunkToRegionCoord(coord, lod);
         if (!_regions.TryGetValue(regionCoord, out var region)) return;
@@ -715,7 +861,9 @@ public class VoxelWorld : MonoBehaviour
         var local = coord - RegionBaseChunkCoord(regionCoord);
         if (region.HasChunk(local.x, local.y, local.z)) return;
 
-        region.SetChunk(local.x, local.y, local.z, chunk);
+        var bytes = new byte[VoxelChunk.VoxelCount];
+        chunk.CopyTo(bytes);
+        region.SetChunk(local.x, local.y, local.z, bytes);
 
         if (region.IsComplete && _desiredRegions.Contains(regionCoord)
             && !_regionInFlight.Contains(regionCoord)
@@ -723,46 +871,37 @@ public class VoxelWorld : MonoBehaviour
             RequestRegionMesh(regionCoord, region);
     }
 
-    // ── LOD 1+ region tasks ───────────────────────────────────────────────────
+    // ── LOD 1+ region tasks (Task.Run) ────────────────────────────────────────
 
     private void RequestRegionMesh(Vector3Int regionCoord, RegionData region)
     {
         _regionInFlight.Add(regionCoord);
-        int step = 1 << regionCoord.y; // step is invariant: 2/4/8 for LOD 1/2/3
+        int step = 1 << regionCoord.y;
 
-        // Only horizontal neighbours — ±X and ±Z. Vertical (±Y) entries stay null since
-        // regions span the full world height. Note: adding dirs[2/3] would change the lod
-        // component of the coord, returning a different-level region which is not a neighbour.
         var neighbours = new RegionData[6];
-        var dirs = ChunkRenderer.RegionNeighbourDirs;
+        var dirs = MeshBuilder.RegionNeighbourDirs;
         neighbours[0] = GetRegion(regionCoord + dirs[0]);
         neighbours[1] = GetRegion(regionCoord + dirs[1]);
         neighbours[4] = GetRegion(regionCoord + dirs[4]);
         neighbours[5] = GetRegion(regionCoord + dirs[5]);
 
-        var token = _generationCts.Token; // snapshot — immune to later CTS replacement
+        var token = _regionCts.Token;
         Task.Run(async () =>
         {
-            try { await _semaphore.WaitAsync(token); }
-            catch (OperationCanceledException)
-            {
-                // Notify main thread to remove this region from _regionInFlight so it
-                // can be re-requested at the new position if still desired.
-                _cancelledRegionCoords.Enqueue(regionCoord);
-                return;
-            }
+            try { await _regionSemaphore.WaitAsync(token); }
+            catch (OperationCanceledException) { _cancelledRegions.Enqueue(regionCoord); return; }
             try
             {
-                var mesh = ChunkRenderer.BuildRegionMeshData(region, neighbours, step);
+                var mesh = MeshBuilder.BuildRegionMeshData(region, neighbours, step);
                 _regionReadyQueue.Enqueue(new RegionBuildResult(regionCoord, mesh));
             }
-            finally { _semaphore.Release(); }
+            finally { _regionSemaphore.Release(); }
         });
     }
 
     private bool ApplyReadyRegions()
     {
-        int applied = 0;
+        int  applied  = 0;
         bool anyAdded = false;
         while (applied < maxApplyPerFrame && _regionReadyQueue.TryDequeue(out var result))
         {
@@ -771,37 +910,30 @@ public class VoxelWorld : MonoBehaviour
             if (!_regionMeshes.ContainsKey(result.RegionCoord)
                 && _desiredRegions.Contains(result.RegionCoord))
             {
-                var mesh = ChunkRenderer.CreateMesh(result.MeshData); // O(1) pointer handoff
-                _regionMeshes[result.RegionCoord] = mesh; // null = empty region sentinel
+                _regionMeshes[result.RegionCoord] = MeshBuilder.CreateMesh(result.MeshData);
                 anyAdded = true;
             }
             else
             {
-                result.MeshData?.Discard(); // region no longer desired — free unmanaged memory
+                result.MeshData?.Discard();
             }
-
             applied++;
         }
         return anyAdded;
     }
 
-    private void UnloadChunk(Vector3Int coord)
+    // ── Mesh lifecycle ────────────────────────────────────────────────────────
+
+    private void UnloadChunkMesh(Vector3Int coord)
     {
         if (_chunkMeshes.TryGetValue(coord, out var mesh)) { Destroy(mesh); _chunkMeshes.Remove(coord); }
     }
 
-    private void UnloadRegion(Vector3Int r)
+    private void UnloadRegionMesh(Vector3Int r)
     {
         if (_regionMeshes.TryGetValue(r, out var mesh)) { Destroy(mesh); _regionMeshes.Remove(r); }
     }
 
-    // ── Draw meshes ───────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Submits all loaded chunk and region meshes to Unity's renderer each frame via
-    /// Graphics.DrawMesh. No GameObjects are used. Unity automatically frustum-culls
-    /// each mesh using its pre-computed bounds (set during background mesh build).
-    /// </summary>
     private void DrawAllMeshes()
     {
         if (chunkMaterial == null) return;
@@ -824,7 +956,7 @@ public class VoxelWorld : MonoBehaviour
         }
     }
 
-    // ── Terrain generation ────────────────────────────────────────────────────
+    // ── Terrain settings ──────────────────────────────────────────────────────
 
     public TerrainSettings GetTerrainSettings() => new TerrainSettings
     {
@@ -845,76 +977,22 @@ public class VoxelWorld : MonoBehaviour
         snowAltitude   = snowAltitude,
     };
 
-    private static PaletteChunk GenerateChunkData(Vector3Int coord, in TerrainSettings s,
-                                                   bool lowDetail = false)
-    {
-        var chunk   = new PaletteChunk();
-        chunk.SeedPalette(BlockType.Stone, BlockType.Dirt, BlockType.Grass,
-                          BlockType.Sand,  BlockType.Water, BlockType.Snow);
-        int offsetX = coord.x * PaletteChunk.Size;
-        int offsetY = coord.y * PaletteChunk.Size;
-        int offsetZ = coord.z * PaletteChunk.Size;
-        int chunkTop = offsetY + PaletteChunk.Size - 1;
-
-        // ── Fast-path: chunk is entirely above or below terrain ───────────────
-        // Sample the 4 corners (4 noise calls) to get a conservative surface range.
-        // This skips the full 256-column pass for the majority of aerial and deep chunks.
-        int minSurface = int.MaxValue, maxSurface = int.MinValue;
-        for (int cz = 0; cz <= PaletteChunk.Size; cz += PaletteChunk.Size)
-        for (int cx = 0; cx <= PaletteChunk.Size; cx += PaletteChunk.Size)
-        {
-            int h = TerrainGenerator.GetSurface(offsetX + cx, offsetZ + cz, s, lowDetail);
-            if (h < minSurface) minSurface = h;
-            if (h > maxSurface) maxSurface = h;
-        }
-
-        // All voxels below min surface minus dirt depth → solid stone
-        if (chunkTop < minSurface - s.dirtDepth)
-        {
-            chunk.FillAll(BlockType.Stone);
-            return chunk;
-        }
-
-        // All voxels above max surface and above sea level → empty air (default)
-        if (offsetY > maxSurface && offsetY > s.seaLevel)
-            return chunk;
-
-        // ── Full per-column pass ──────────────────────────────────────────────
-        for (int z = 0; z < PaletteChunk.Size; z++)
-        for (int x = 0; x < PaletteChunk.Size; x++)
-        {
-            int surface = TerrainGenerator.GetSurface(offsetX + x, offsetZ + z, s, lowDetail);
-
-            for (int y = 0; y < PaletteChunk.Size; y++)
-            {
-                byte block = TerrainGenerator.GetBlock(offsetX + x, offsetY + y, offsetZ + z, surface, s);
-                if (block != BlockType.Air)
-                    chunk.SetBlock(x, y, z, block);
-            }
-        }
-        return chunk;
-    }
-
     // ── Public API ────────────────────────────────────────────────────────────
 
-    public PaletteChunk GetChunk(Vector3Int coord) =>
-        _chunks.TryGetValue(coord, out var c) ? c : null;
+    public bool TryGetChunk(Vector3Int coord, out VoxelChunk chunk) =>
+        _chunks.TryGetValue(coord, out chunk);
 
     public RegionData GetRegion(Vector3Int regionCoord) =>
         _regions.TryGetValue(regionCoord, out var r) ? r : null;
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── Coordinate helpers ────────────────────────────────────────────────────
 
     private static Vector3Int WorldToChunkCoord(Vector3 p)
     {
-        int s = PaletteChunk.Size;
+        int s = VoxelChunk.Size;
         return new Vector3Int(Mathf.FloorToInt(p.x / s), 0, Mathf.FloorToInt(p.z / s));
     }
 
-    /// <summary>
-    /// Maps a chunk coord to the region coord at the given LOD level.
-    /// LOD level is stored in regionCoord.y so all levels share the same dictionaries.
-    /// </summary>
     private static Vector3Int ChunkToRegionCoord(Vector3Int chunk, int lodLevel)
     {
         int size = 1 << lodLevel;
@@ -924,7 +1002,6 @@ public class VoxelWorld : MonoBehaviour
             Mathf.FloorToInt(chunk.z / (float)size));
     }
 
-    /// <summary>Returns the minimum-corner chunk coord of a region (uses regionCoord.y as LOD level).</summary>
     private static Vector3Int RegionBaseChunkCoord(Vector3Int regionCoord)
     {
         int size = 1 << regionCoord.y;
@@ -933,36 +1010,30 @@ public class VoxelWorld : MonoBehaviour
 
     private static Vector3 ChunkToWorldPos(Vector3Int c)
     {
-        float s = PaletteChunk.Size; return new Vector3(c.x * s, c.y * s, c.z * s);
+        float s = VoxelChunk.Size;
+        return new Vector3(c.x * s, c.y * s, c.z * s);
     }
 
     private static Vector3 RegionWorldPos(Vector3Int regionCoord)
     {
-        float s = PaletteChunk.Size * (1 << regionCoord.y);
+        float s = VoxelChunk.Size * (1 << regionCoord.y);
         return new Vector3(regionCoord.x * s, 0, regionCoord.z * s);
     }
 
     private static Vector3 ChunkCenterWorld(Vector3Int c)
     {
-        float s = PaletteChunk.Size;
-        return new Vector3(c.x * s + s * 0.5f, c.y * s + s * 0.5f, c.z * s + s * 0.5f);
+        float s = VoxelChunk.Size;
+        return new Vector3(c.x * s + s * .5f, c.y * s + s * .5f, c.z * s + s * .5f);
     }
 
     private static Vector3 RegionCenterWorld(Vector3Int regionCoord)
     {
-        float s = PaletteChunk.Size * (1 << regionCoord.y);
-        return new Vector3(regionCoord.x * s + s * 0.5f, 0, regionCoord.z * s + s * 0.5f);
-    }
-
-    private static Bounds ChunkBounds(Vector3Int c) =>
-        new Bounds(ChunkCenterWorld(c), Vector3.one * PaletteChunk.Size);
-
-    private static Bounds RegionBounds(Vector3Int regionCoord)
-    {
-        float s = PaletteChunk.Size * (1 << regionCoord.y);
-        return new Bounds(RegionCenterWorld(regionCoord), new Vector3(s, s, s));
+        float s = VoxelChunk.Size * (1 << regionCoord.y);
+        return new Vector3(regionCoord.x * s + s * .5f, 0, regionCoord.z * s + s * .5f);
     }
 }
+
+// ── Extension helper ──────────────────────────────────────────────────────────
 
 internal static class Vector3Ext
 {

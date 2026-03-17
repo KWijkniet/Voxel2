@@ -34,9 +34,7 @@ public class VoxelWorldEditor : Editor
 
         GUI.backgroundColor = new Color(0.9f, 0.4f, 0.4f);
         if (GUILayout.Button("Clear World", GUILayout.Height(30)))
-        {
             ClearWorld(world);
-        }
 
         GUI.backgroundColor = Color.white;
     }
@@ -49,30 +47,41 @@ public class VoxelWorldEditor : Editor
 
         int view = world.viewDistance;
 
-        // Pass 1: generate all chunk data so neighbours are available during meshing
-        var chunkData = new Dictionary<Vector3Int, PaletteChunk>();
+        // Pass 1: generate all chunk voxel data so neighbours are available during meshing
+        var chunkData = new Dictionary<Vector3Int, byte[]>();
         for (int x = -view; x <= view; x++)
         for (int z = -view; z <= view; z++)
         for (int y = 0; y < world.verticalChunks; y++)
         {
             var coord = new Vector3Int(x, y, z);
-            chunkData[coord] = GenerateChunk(world, coord);
+            chunkData[coord] = GenerateChunkBytes(world, coord);
         }
 
         // Pass 2: build meshes with neighbour awareness
+        int s = VoxelChunk.Size;
         foreach (var kvp in chunkData)
         {
             var coord = kvp.Key;
+
+            var neighbours = new byte[6][];
+            for (int i = 0; i < 6; i++)
+            {
+                var nc = coord + MeshBuilder.NeighbourDirs[i];
+                chunkData.TryGetValue(nc, out neighbours[i]);
+            }
+
             var go = new GameObject($"Chunk {coord.x},{coord.y},{coord.z}");
             go.transform.SetParent(world.transform, false);
-            go.transform.localPosition = new Vector3(
-                coord.x * PaletteChunk.Size,
-                coord.y * PaletteChunk.Size,
-                coord.z * PaletteChunk.Size);
+            go.transform.localPosition = new Vector3(coord.x * s, coord.y * s, coord.z * s);
 
-            var renderer = go.AddComponent<ChunkRenderer>();
-            renderer.Render(kvp.Value, coord,
-                c => chunkData.TryGetValue(c, out var n) ? n : null, mat);
+            var meshData = MeshBuilder.BuildMeshData(kvp.Value, neighbours);
+            if (meshData != null)
+            {
+                var mf = go.AddComponent<MeshFilter>();
+                var mr = go.AddComponent<MeshRenderer>();
+                mf.sharedMesh       = MeshBuilder.CreateMesh(meshData);
+                mr.sharedMaterial   = mat;
+            }
 
             Undo.RegisterCreatedObjectUndo(go, "Generate World");
         }
@@ -83,11 +92,8 @@ public class VoxelWorldEditor : Editor
     private void ClearWorld(VoxelWorld world)
     {
         Undo.RegisterFullObjectHierarchyUndo(world.gameObject, "Clear World");
-
-        // Destroy all child GameObjects
         for (int i = world.transform.childCount - 1; i >= 0; i--)
             Undo.DestroyObjectImmediate(world.transform.GetChild(i).gameObject);
-
         EditorUtility.SetDirty(world);
     }
 
@@ -95,41 +101,36 @@ public class VoxelWorldEditor : Editor
 
     private void OnSceneGUI()
     {
-        var world = (VoxelWorld)target;
-
+        var world    = (VoxelWorld)target;
         var sceneCam = SceneView.lastActiveSceneView?.camera;
         if (sceneCam == null) return;
 
-        var planes   = GeometryUtility.CalculateFrustumPlanes(sceneCam);
-        var origin   = world.player != null ? world.player.position : world.transform.position;
-        var pChunk   = new Vector3Int(
-            Mathf.FloorToInt(origin.x / PaletteChunk.Size), 0,
-            Mathf.FloorToInt(origin.z / PaletteChunk.Size));
+        var planes  = GeometryUtility.CalculateFrustumPlanes(sceneCam);
+        var origin  = world.player != null ? world.player.position : world.transform.position;
+        var pChunk  = new Vector3Int(
+            Mathf.FloorToInt(origin.x / VoxelChunk.Size), 0,
+            Mathf.FloorToInt(origin.z / VoxelChunk.Size));
 
-        float cs      = PaletteChunk.Size;
+        float cs      = VoxelChunk.Size;
         int   aligned = world.AlignedViewDistance;
-        int   maxR    = aligned * (1 << world.lodLevels);
 
-        // ── LOD 0 zone: individual chunks ─────────────────────────────────────
+        // LOD 0 zone
         for (int x = -aligned; x <= aligned; x++)
         for (int z = -aligned; z <= aligned; z++)
         for (int y = 0; y < world.verticalChunks; y++)
         {
             var coord  = new Vector3Int(pChunk.x + x, y, pChunk.z + z);
-            var center = new Vector3(coord.x * cs + cs * 0.5f, coord.y * cs + cs * 0.5f, coord.z * cs + cs * 0.5f);
+            var center = new Vector3(coord.x * cs + cs * .5f, coord.y * cs + cs * .5f, coord.z * cs + cs * .5f);
             bool inFrustum = GeometryUtility.TestPlanesAABB(planes, new Bounds(center, Vector3.one * cs));
 
-            Handles.color = inFrustum
-                ? new Color(0.2f, 0.8f, 1f, 0.4f)
-                : new Color(1f, 0.2f, 0.2f, 0.12f);
+            Handles.color = inFrustum ? new Color(0.2f, 0.8f, 1f, 0.4f) : new Color(1f, 0.2f, 0.2f, 0.12f);
             Handles.DrawWireCube(center, Vector3.one * cs);
         }
 
-        // ── LOD 1+ zone: region outlines (one ring per LOD level) ────────────
+        // LOD 1+ region outlines
         if (world.lodLevels > 0)
         {
-            var drawnRegions = new System.Collections.Generic.HashSet<Vector3Int>();
-
+            var drawn = new HashSet<Vector3Int>();
             for (int lod = 1; lod <= world.lodLevels; lod++)
             {
                 int   hSize       = 1 << lod;
@@ -144,44 +145,39 @@ public class VoxelWorldEditor : Editor
                 for (int rx = -maxRegionR; rx <= maxRegionR; rx++)
                 for (int rz = -maxRegionR; rz <= maxRegionR; rz++)
                 {
-                    var regionCoord = new Vector3Int(playerRX + rx, lod, playerRZ + rz);
-                    if (!drawnRegions.Add(regionCoord)) continue;
+                    var rc = new Vector3Int(playerRX + rx, lod, playerRZ + rz);
+                    if (!drawn.Add(rc)) continue;
 
-                    int baseX    = regionCoord.x * hSize;
-                    int baseZ    = regionCoord.z * hSize;
+                    int baseX    = rc.x * hSize, baseZ = rc.z * hSize;
                     int nearestX = Mathf.Clamp(pChunk.x, baseX, baseX + hSize - 1);
                     int nearestZ = Mathf.Clamp(pChunk.z, baseZ, baseZ + hSize - 1);
                     int chebDist = Mathf.Max(Mathf.Abs(nearestX - pChunk.x),
                                              Mathf.Abs(nearestZ - pChunk.z));
-
                     if (chebDist >= outerRadius || chebDist < innerRadius) continue;
 
-                    var  center    = new Vector3(regionCoord.x * rs + rs * 0.5f, 0, regionCoord.z * rs + rs * 0.5f);
+                    var center     = new Vector3(rc.x * rs + rs * .5f, 0, rc.z * rs + rs * .5f);
                     bool inFrustum = GeometryUtility.TestPlanesAABB(planes,
-                        new Bounds(center, new Vector3(rs, rs, rs)));
-
-                    Handles.color = inFrustum
+                                        new Bounds(center, new Vector3(rs, rs, rs)));
+                    Handles.color  = inFrustum
                         ? new Color(lodColor.r, lodColor.g, lodColor.b, 0.35f)
                         : new Color(0.5f, 0.5f, 0.5f, 0.08f);
-                    Handles.DrawWireCube(center, new Vector3(rs, rs * 0.5f, rs));
+                    Handles.DrawWireCube(center, new Vector3(rs, rs * .5f, rs));
                 }
             }
         }
 
-        // ── Legend ────────────────────────────────────────────────────────────
+        // Legend
         Handles.BeginGUI();
         int legendH = 22 + 18 * (3 + world.lodLevels);
-        var rect = new Rect(10, 10, 220, legendH);
-        GUI.Box(rect, GUIContent.none);
+        GUI.Box(new Rect(10, 10, 220, legendH), GUIContent.none);
         GUI.Label(new Rect(14, 12, 210, 18), "LOD + Frustum Preview");
-        DrawLegendEntry(new Rect(14, 30, 210, 16), new Color(0.2f, 1f, 0.2f),  "Bypass radius (LOD 0)");
-        DrawLegendEntry(new Rect(14, 48, 210, 16), new Color(0.2f, 0.8f, 1f),  "LOD 0 in frustum");
-        DrawLegendEntry(new Rect(14, 66, 210, 16), new Color(1f, 0.2f, 0.2f),  "LOD 0 culled");
+        DrawLegendEntry(new Rect(14, 30, 210, 16), new Color(0.2f, 0.8f, 1f), "LOD 0 in frustum");
+        DrawLegendEntry(new Rect(14, 48, 210, 16), new Color(1f,  0.2f, 0.2f), "LOD 0 culled");
         for (int lod = 1; lod <= world.lodLevels; lod++)
         {
             var col   = Color.HSVToRGB(0.08f + lod * 0.1f, 0.8f, 0.9f);
             int hSize = 1 << lod;
-            DrawLegendEntry(new Rect(14, 66 + lod * 18, 210, 16), col,
+            DrawLegendEntry(new Rect(14, 48 + lod * 18, 210, 16), col,
                 $"Region LOD {lod} ({hSize}×{hSize} chunks, step {hSize})");
         }
         Handles.EndGUI();
@@ -195,25 +191,23 @@ public class VoxelWorldEditor : Editor
 
     // ── Chunk data generation ─────────────────────────────────────────────────
 
-    private PaletteChunk GenerateChunk(VoxelWorld world, Vector3Int coord)
+    private static byte[] GenerateChunkBytes(VoxelWorld world, Vector3Int coord)
     {
-        var chunk    = new PaletteChunk();
         var settings = world.GetTerrainSettings();
-        int offsetX  = coord.x * PaletteChunk.Size;
-        int offsetY  = coord.y * PaletteChunk.Size;
-        int offsetZ  = coord.z * PaletteChunk.Size;
+        int offsetX  = coord.x * VoxelChunk.Size;
+        int offsetY  = coord.y * VoxelChunk.Size;
+        int offsetZ  = coord.z * VoxelChunk.Size;
+        int s        = VoxelChunk.Size;
+        var blocks   = new byte[VoxelChunk.VoxelCount];
 
-        for (int z = 0; z < PaletteChunk.Size; z++)
-        for (int x = 0; x < PaletteChunk.Size; x++)
+        for (int z = 0; z < s; z++)
+        for (int x = 0; x < s; x++)
         {
             int surface = TerrainGenerator.GetSurface(offsetX + x, offsetZ + z, settings);
-            for (int y = 0; y < PaletteChunk.Size; y++)
-            {
-                byte block = TerrainGenerator.GetBlock(offsetX + x, offsetY + y, offsetZ + z, surface, settings);
-                if (block != BlockType.Air)
-                    chunk.SetBlock(x, y, z, block);
-            }
+            for (int y = 0; y < s; y++)
+                blocks[x + y * s + z * s * s] =
+                    TerrainGenerator.GetBlock(offsetX + x, offsetY + y, offsetZ + z, surface, settings);
         }
-        return chunk;
+        return blocks;
     }
 }

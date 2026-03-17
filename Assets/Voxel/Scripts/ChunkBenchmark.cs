@@ -4,201 +4,170 @@ using UnityEngine;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
+using UnityEngine.Rendering;
 
 /// <summary>
-/// Spawns a single chunk using the same pipeline as VoxelWorld and records
-/// wall-clock timings for every major step. Attach to any GameObject in the scene,
-/// assign the VoxelWorld reference (for terrain settings + material), then press Play
-/// or use the context menu "Run Benchmark".
+/// Benchmarks the full LOD 0 chunk pipeline using the same Burst job chain as VoxelWorld:
+///   1. GenerateChunkJob  (Burst terrain → NativeArray&lt;byte&gt;)
+///   2. BuildChunkMeshJob (Burst greedy mesh → NativeLists)
+///   3. Mesh upload       (NativeLists → Mesh.AllocateWritableMeshData → ApplyAndDispose)
 ///
-/// Results are shown as an on-screen overlay and printed to the console.
+/// Attach to any GameObject, assign the VoxelWorld reference, then press Play or
+/// use the context menu "Run Benchmark".
 /// </summary>
 public class ChunkBenchmark : MonoBehaviour
 {
     [Header("Setup")]
-    [Tooltip("Used to pull terrain settings and chunk material. Must be in the scene.")]
     public VoxelWorld world;
-
-    [Tooltip("Which chunk coordinate to generate.")]
     public Vector3Int chunkCoord = Vector3Int.zero;
+    public bool       runOnStart = true;
 
-    [Tooltip("Run automatically when the scene starts.")]
-    public bool runOnStart = true;
-
-    // ── Results ───────────────────────────────────────────────────────────────
-
-    private string  _report    = "Press Play or right-click → Run Benchmark.";
-    private bool    _ran       = false;
+    private string  _report = "Press Play or right-click → Run Benchmark.";
+    private bool    _ran    = false;
     private Vector2 _scroll;
 
-    // ── Lifecycle ─────────────────────────────────────────────────────────────
-
-    private void Start()
-    {
-        if (runOnStart) RunBenchmark();
-    }
-
-    // ── Benchmark ─────────────────────────────────────────────────────────────
+    private void Start() { if (runOnStart) RunBenchmark(); }
 
     [ContextMenu("Run Benchmark")]
     public void RunBenchmark()
     {
         if (world == null)
         {
-            _report = "[ChunkBenchmark] ERROR: VoxelWorld reference is not set.";
+            _report = "[ChunkBenchmark] VoxelWorld reference not set.";
             UnityEngine.Debug.LogError(_report);
             return;
         }
 
-        var sb     = new StringBuilder();
-        var total  = Stopwatch.StartNew();
-
-        sb.AppendLine("=== Chunk Benchmark ===");
-        sb.AppendLine($"Coord: {chunkCoord}   Unity version: {Application.unityVersion}");
+        var sb    = new StringBuilder();
+        var total = Stopwatch.StartNew();
+        sb.AppendLine("=== Chunk Benchmark (Approach D — Burst pipeline) ===");
+        sb.AppendLine($"Coord: {chunkCoord}   Unity: {Application.unityVersion}");
         sb.AppendLine();
 
-        // ── Step 1: schedule Burst terrain job ───────────────────────────────
+        // ── Step 1: Schedule terrain Burst job ───────────────────────────────
+        var settings = world.GetTerrainSettings();
+        var voxels   = new NativeArray<byte>(VoxelChunk.VoxelCount, Allocator.Persistent,
+                                              NativeArrayOptions.UninitializedMemory);
 
-        TerrainSettings settings = world.GetTerrainSettings();
-        int size     = PaletteChunk.Size;
-        var blocks   = new NativeArray<byte>(size * size * size, Allocator.Persistent);
-
-        var scheduleTimer = Stopwatch.StartNew();
-
-        var job = new GenerateChunkJob
+        var schedTimer = Stopwatch.StartNew();
+        var terrainJob = new GenerateChunkJob
         {
             Settings   = settings,
             ChunkCoord = new int3(chunkCoord.x, chunkCoord.y, chunkCoord.z),
             LowDetail  = false,
-            Blocks     = blocks,
+            Blocks     = voxels,
         };
-        var handle = job.Schedule();
-        JobHandle.ScheduleBatchedJobs(); // flush job queue immediately
+        var terrainHandle = terrainJob.Schedule();
 
-        scheduleTimer.Stop();
-        AppendLine(sb, "1. Job schedule",   scheduleTimer);
+        // ── Step 2: Schedule mesh Burst job (chained dependency) ─────────────
+        // Neighbours are all-zero (air) — no loaded neighbours in standalone benchmark.
+        var emptyNeighbour = new NativeArray<byte>(VoxelChunk.VoxelCount, Allocator.Persistent,
+                                                    NativeArrayOptions.ClearMemory);
 
-        // ── Step 2: wait for Burst terrain job to complete ───────────────────
+        var verts = new NativeList<float3>(4096, Allocator.Persistent);
+        var norms = new NativeList<float3>(4096, Allocator.Persistent);
+        var uvs   = new NativeList<float2>(4096, Allocator.Persistent);
+        var tris  = new NativeList<int>   (6144, Allocator.Persistent);
 
-        var executeTimer = Stopwatch.StartNew();
-        handle.Complete();
-        executeTimer.Stop();
-        AppendLine(sb, "2. Terrain gen (Burst, incl. worker wait)", executeTimer);
+        var meshJob = new BuildChunkMeshJob
+        {
+            Voxels = voxels,
+            N_PX = emptyNeighbour, N_NX = emptyNeighbour,
+            N_PY = emptyNeighbour, N_NY = emptyNeighbour,
+            N_PZ = emptyNeighbour, N_NZ = emptyNeighbour,
+            NeighbourMask = 0, // no real neighbours
+            Step          = 1,
+            Vertices      = verts, Normals = norms, UVs = uvs, Triangles = tris,
+        };
+        var meshHandle = meshJob.Schedule(terrainHandle);
+        JobHandle.ScheduleBatchedJobs();
+        schedTimer.Stop();
+        AppendLine(sb, "1. Schedule terrain + mesh jobs (chained)", schedTimer);
 
-        // ── Step 3: build PaletteChunk from raw block data ───────────────────
+        // ── Step 3: Wait for both jobs to complete ───────────────────────────
+        var waitTimer = Stopwatch.StartNew();
+        meshHandle.Complete();
+        waitTimer.Stop();
+        AppendLine(sb, "2. Burst execute (terrain + greedy mesh, incl. worker wait)", waitTimer,
+                   $"{verts.Length} verts, {tris.Length / 3} tris");
 
-        var paletteTimer = Stopwatch.StartNew();
-        var chunk = BuildPaletteChunk(blocks);
-        paletteTimer.Stop();
-        blocks.Dispose();
-
-        int nonAirVoxels = CountNonAir(chunk);
-        AppendLine(sb, "3. Palette chunk build (SeedPalette + SetBlock × 4096)", paletteTimer,
-                   $"{nonAirVoxels} / 4096 non-air voxels");
-
-        // ── Step 4: greedy mesh generation ───────────────────────────────────
-
-        // Neighbours are null here (standalone benchmark); real world would load them.
-        var neighbours  = new PaletteChunk[6];
-        var meshTimer   = Stopwatch.StartNew();
-        var writableData = ChunkRenderer.BuildMeshData(chunk, neighbours, 0);
-        meshTimer.Stop();
-
-        // Apply() uploads to GPU and returns the Mesh (O(1) pointer hand-off).
-        // Returns null for empty chunks; stats will be 0 in that case.
+        // ── Step 4: Upload mesh from NativeLists ─────────────────────────────
         var uploadTimer = Stopwatch.StartNew();
-        var mesh = writableData?.Apply();
+        Mesh mesh = null;
+        if (verts.Length > 0)
+        {
+            bool use32 = verts.Length > ushort.MaxValue;
+            var  mda   = Mesh.AllocateWritableMeshData(1);
+            var  md    = mda[0];
+            md.SetVertexBufferParams(verts.Length,
+                new VertexAttributeDescriptor(VertexAttribute.Position,  VertexAttributeFormat.Float32, 3, stream: 0),
+                new VertexAttributeDescriptor(VertexAttribute.Normal,    VertexAttributeFormat.Float32, 3, stream: 1),
+                new VertexAttributeDescriptor(VertexAttribute.TexCoord0, VertexAttributeFormat.Float32, 2, stream: 2));
+            md.SetIndexBufferParams(tris.Length, use32 ? IndexFormat.UInt32 : IndexFormat.UInt16);
+            md.GetVertexData<float3>(0).CopyFrom(verts.AsArray());
+            md.GetVertexData<float3>(1).CopyFrom(norms.AsArray());
+            md.GetVertexData<float2>(2).CopyFrom(uvs.AsArray());
+            if (use32) { md.GetIndexData<int>().CopyFrom(tris.AsArray()); }
+            else       { var idx = md.GetIndexData<ushort>(); for (int i = 0; i < tris.Length; i++) idx[i] = (ushort)tris[i]; }
+            md.subMeshCount = 1;
+            md.SetSubMesh(0, new SubMeshDescriptor(0, tris.Length),
+                MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+            mesh = new Mesh { name = "BenchmarkChunk" };
+            Mesh.ApplyAndDisposeWritableMeshData(mda, mesh,
+                MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+            int s = VoxelChunk.Size;
+            mesh.bounds = new Bounds(new Vector3(s*.5f, s*.5f, s*.5f), new Vector3(s, s, s));
+        }
         uploadTimer.Stop();
+        AppendLine(sb, "3. Mesh upload (NativeList → AllocateWritableMeshData → Apply)", uploadTimer);
 
-        int vertCount = mesh != null ? mesh.vertexCount : 0;
-        int triCount  = mesh != null ? mesh.triangles.Length / 3 : 0;
-        AppendLine(sb, "4. Greedy mesh generation", meshTimer,
-                   $"{vertCount} verts, {triCount} tris");
+        // ── Cleanup ──────────────────────────────────────────────────────────
+        voxels.Dispose();
+        emptyNeighbour.Dispose();
+        verts.Dispose(); norms.Dispose(); uvs.Dispose(); tris.Dispose();
 
-        // ── Step 5: GameObject + mesh upload (main thread) ───────────────────
-
-        AppendLine(sb, "5. Mesh upload (ApplyAndDisposeWritableMeshData)", uploadTimer);
-
+        // Create a preview GameObject
         var go = new GameObject($"Benchmark Chunk {chunkCoord.x},{chunkCoord.y},{chunkCoord.z}");
         go.transform.SetParent(transform, false);
         go.transform.localPosition = new Vector3(
-            chunkCoord.x * size, chunkCoord.y * size, chunkCoord.z * size);
+            chunkCoord.x * VoxelChunk.Size,
+            chunkCoord.y * VoxelChunk.Size,
+            chunkCoord.z * VoxelChunk.Size);
         if (mesh != null)
         {
-            var mf = go.AddComponent<MeshFilter>();
-            var mr = go.AddComponent<MeshRenderer>();
-            mf.sharedMesh = mesh;
-            mr.sharedMaterial = world.chunkMaterial;
+            go.AddComponent<MeshFilter>().sharedMesh      = mesh;
+            go.AddComponent<MeshRenderer>().sharedMaterial = world.chunkMaterial;
         }
-
-        // ── Total ─────────────────────────────────────────────────────────────
 
         total.Stop();
         sb.AppendLine();
         sb.AppendLine($"  TOTAL: {total.Elapsed.TotalMilliseconds:F3} ms");
         sb.AppendLine();
-        sb.AppendLine("Note: neighbours were null — outer faces not culled.");
-        sb.AppendLine("Step 2 includes time the main thread waited for the worker thread.");
+        sb.AppendLine("Note: neighbours were null (all-air). Outer faces are not culled.");
+        sb.AppendLine("Step 2 includes main-thread wait for worker threads.");
 
         _report = sb.ToString();
         _ran    = true;
         UnityEngine.Debug.Log(_report);
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private static void AppendLine(StringBuilder sb, string label, Stopwatch sw,
-                                   string extra = null)
+    private static void AppendLine(StringBuilder sb, string label, Stopwatch sw, string extra = null)
     {
-        string time = $"{sw.Elapsed.TotalMilliseconds,8:F3} ms";
-        sb.Append($"  {time}  {label}");
+        sb.Append($"  {sw.Elapsed.TotalMilliseconds,8:F3} ms  {label}");
         if (extra != null) sb.Append($"  ({extra})");
         sb.AppendLine();
     }
 
-    /// <summary>Replicates VoxelWorld.BuildPaletteChunkFromBlocks.</summary>
-    private static PaletteChunk BuildPaletteChunk(NativeArray<byte> blocks)
-    {
-        var chunk = new PaletteChunk();
-        chunk.SeedPalette(BlockType.Stone, BlockType.Dirt, BlockType.Grass,
-                          BlockType.Sand,  BlockType.Water, BlockType.Snow);
-        int s = PaletteChunk.Size;
-        for (int z = 0; z < s; z++)
-        for (int x = 0; x < s; x++)
-        for (int y = 0; y < s; y++)
-        {
-            byte b = blocks[x + y * s + z * s * s];
-            if (b != BlockType.Air) chunk.SetBlock(x, y, z, b);
-        }
-        return chunk;
-    }
-
-    private static int CountNonAir(PaletteChunk chunk)
-    {
-        int count = 0;
-        int s = PaletteChunk.Size;
-        for (int z = 0; z < s; z++)
-        for (int x = 0; x < s; x++)
-        for (int y = 0; y < s; y++)
-            if (chunk.GetBlock(x, y, z) != BlockType.Air) count++;
-        return count;
-    }
-
-    // ── On-screen overlay ─────────────────────────────────────────────────────
-
     private void OnGUI()
     {
-        float w = Mathf.Min(620f, Screen.width - 20f);
-        float h = Mathf.Min(320f, Screen.height - 20f);
+        float w = Mathf.Min(640f, Screen.width - 20f);
+        float h = Mathf.Min(340f, Screen.height - 20f);
         GUI.Box(new Rect(10, 10, w, h), GUIContent.none);
-
         GUILayout.BeginArea(new Rect(14, 14, w - 8, h - 8));
         _scroll = GUILayout.BeginScrollView(_scroll);
         GUILayout.Label(_report);
         GUILayout.EndScrollView();
-
-        if (!_ran && GUILayout.Button("Run Benchmark"))
-            RunBenchmark();
+        if (!_ran && GUILayout.Button("Run Benchmark")) RunBenchmark();
         GUILayout.EndArea();
     }
 }
