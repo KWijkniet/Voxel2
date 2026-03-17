@@ -16,8 +16,7 @@ using Unity.Mathematics;
 [BurstCompile]
 public struct BuildChunkMeshJob : IJob
 {
-    private const int   Size          = VoxelChunk.Size; // 16
-    private const float AtlasTileCount = BlockType.AtlasTileCount;
+    private const int Size = VoxelChunk.Size; // 16
 
     // ── Inputs ────────────────────────────────────────────────────────────────
     [ReadOnly] public NativeArray<byte> Voxels;
@@ -32,7 +31,8 @@ public struct BuildChunkMeshJob : IJob
     // ── Outputs (pre-allocated Persistent NativeLists) ────────────────────────
     public NativeList<float3> Vertices;
     public NativeList<float3> Normals;
-    public NativeList<float2> UVs;
+    public NativeList<float2> UVs;   // channel 0: face-local coords (0..w, 0..h) for tiling
+    public NativeList<float2> UV2s;  // channel 1: x = texture array slice (blockType - 1)
     public NativeList<int>    Triangles;
 
     // ── IJob ──────────────────────────────────────────────────────────────────
@@ -129,9 +129,16 @@ public struct BuildChunkMeshJob : IJob
                 Normals.Add(normalVec); Normals.Add(normalVec);
                 Normals.Add(normalVec); Normals.Add(normalVec);
 
-                float tileU = (blockType - 1 + 0.5f) / AtlasTileCount;
-                UVs.Add(new float2(tileU, 0f)); UVs.Add(new float2(tileU, 0f));
-                UVs.Add(new float2(tileU, 1f)); UVs.Add(new float2(tileU, 1f));
+                // UV0: face-local coords — tile once per voxel unit, frac() in shader tiles the texture
+                UVs.Add(new float2(0, 0));
+                UVs.Add(new float2(w, 0));
+                UVs.Add(new float2(w, h));
+                UVs.Add(new float2(0, h));
+
+                // UV1: texture array slice index
+                float texSlice = blockType - 1;
+                UV2s.Add(new float2(texSlice, 0)); UV2s.Add(new float2(texSlice, 0));
+                UV2s.Add(new float2(texSlice, 0)); UV2s.Add(new float2(texSlice, 0));
 
                 if (backFace)
                 {

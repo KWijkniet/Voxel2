@@ -3,117 +3,219 @@ using UnityEngine;
 using UnityEditor;
 
 /// <summary>
-/// Generates a pixel-art texture atlas and a URP Lit material from it.
-/// Atlas layout: [Stone | Dirt | Grass | Sand | Water | Snow | Sandstone | FrozenDirt] — one texel per block type.
-/// Point filtering ensures clean colour boundaries with no bleed.
+/// Generates a Texture2DArray and a VoxelTerrain material from it.
+///
+/// Texture lookup order per block type (BlockType constants 1–8):
+///   1. Assets/Voxel/Textures/stone.png  (or dirt.png, grass.png, …)
+///   2. Procedural fallback — a coloured pattern generated in code.
+///
+/// Drop 16×16 (or any power-of-2) PNGs into Assets/Voxel/Textures/ named
+/// stone, dirt, grass, sand, water, snow, sandstone, frozendirt to use your own art.
+///
+/// Atlas layout: [Stone | Dirt | Grass | Sand | Water | Snow | Sandstone | FrozenDirt]
 /// </summary>
 public static class VoxelMaterialGenerator
 {
-    private const string OutputFolder  = "Assets/Voxel/Generated";
-    private const string TexturePath   = OutputFolder + "/VoxelAtlas.png";
-    private const string MaterialPath  = OutputFolder + "/VoxelTerrain.mat";
+    private const string OutputFolder   = "Assets/Voxel/Generated";
+    private const string TextureArrPath = OutputFolder + "/VoxelTexArray.asset";
+    private const string MaterialPath   = OutputFolder + "/VoxelTerrain.mat";
+    private const string ShaderPath     = "Voxel/VoxelTerrain";
+    private const string TextureFolder  = "Assets/Voxel/Textures";
+    private const int    TileSize       = 16;
 
-    // One colour per solid block type (order matches BlockType: Stone=1 … FrozenDirt=8)
-    private static readonly Color32[] BlockColours =
+    // Name and fallback colour per block slot (index 0 = BlockType 1 = Stone)
+    private static readonly (string name, Color32 fallback)[] BlockDefs =
     {
-        new Color32(120, 120, 120, 255), // Stone      — grey
-        new Color32(139,  90,  43, 255), // Dirt       — brown
-        new Color32( 67, 155,  40, 255), // Grass      — green
-        new Color32(194, 178, 128, 255), // Sand       — tan
-        new Color32( 30, 100, 200, 255), // Water      — blue
-        new Color32(220, 235, 255, 255), // Snow       — ice white
-        new Color32(210, 180,  90, 255), // Sandstone  — warm tan-orange
-        new Color32(100,  95, 110, 255), // FrozenDirt — cold grey-blue
+        ("stone",     new Color32(120, 120, 120, 255)),
+        ("dirt",      new Color32(139,  90,  43, 255)),
+        ("grass",     new Color32( 67, 155,  40, 255)),
+        ("sand",      new Color32(194, 178, 128, 255)),
+        ("water",     new Color32( 30, 100, 200, 255)),
+        ("snow",      new Color32(220, 235, 255, 255)),
+        ("sandstone", new Color32(210, 180,  90, 255)),
+        ("frozendirt",new Color32(100,  95, 110, 255)),
     };
 
-    /// <summary>Generates the atlas texture and material, saves them as assets, and returns the material.</summary>
     public static Material Generate()
     {
         EnsureFolder();
 
-        var tex = BuildAtlasTexture();
-        SaveTexture(tex, TexturePath);
+        var arr = BuildTextureArray();
+        AssetDatabase.CreateAsset(arr, TextureArrPath);
 
-        var mat = BuildMaterial(AssetDatabase.LoadAssetAtPath<Texture2D>(TexturePath));
+        var mat = BuildMaterial(arr);
         AssetDatabase.CreateAsset(mat, MaterialPath);
+
         AssetDatabase.SaveAssets();
         AssetDatabase.Refresh();
 
-        Debug.Log($"[VoxelMaterialGenerator] Saved atlas → {TexturePath}\n" +
-                  $"                         Material  → {MaterialPath}");
-
+        Debug.Log($"[VoxelMaterialGenerator] Texture array → {TextureArrPath}\n" +
+                  $"                         Material       → {MaterialPath}");
         return AssetDatabase.LoadAssetAtPath<Material>(MaterialPath);
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── Texture array ─────────────────────────────────────────────────────────
 
-    private static Texture2D BuildAtlasTexture()
+    private static Texture2DArray BuildTextureArray()
     {
-        int tileCount = BlockColours.Length; // == BlockType.AtlasTileCount
-        var tex = new Texture2D(tileCount, 1, TextureFormat.RGBA32, mipChain: false)
+        int count = BlockDefs.Length;
+        var arr   = new Texture2DArray(TileSize, TileSize, count,
+                                       TextureFormat.RGBA32, mipChain: true)
         {
-            filterMode = FilterMode.Point,   // hard pixel edges, no bleed between tiles
-            wrapMode   = TextureWrapMode.Clamp,
-            name       = "VoxelAtlas",
+            filterMode = FilterMode.Point,
+            wrapMode   = TextureWrapMode.Repeat,
+            name       = "VoxelTexArray",
         };
 
-        for (int i = 0; i < tileCount; i++)
-            tex.SetPixel(i, 0, BlockColours[i]);
+        for (int i = 0; i < count; i++)
+        {
+            Texture2D tex = TryLoadTexture(BlockDefs[i].name)
+                         ?? GenerateFallback(BlockDefs[i].name, BlockDefs[i].fallback);
+            var pixels = tex.GetPixels32();
+            arr.SetPixels32(pixels, i);
+        }
 
+        arr.Apply();
+        return arr;
+    }
+
+    /// <summary>
+    /// Tries to load Assets/Voxel/Textures/{name}.png.
+    /// Returns null if the file is missing or can't be read.
+    /// </summary>
+    private static Texture2D TryLoadTexture(string name)
+    {
+        string path = $"{TextureFolder}/{name}.png";
+        var    tex  = AssetDatabase.LoadAssetAtPath<Texture2D>(path);
+        if (tex == null) return null;
+
+        // Make sure it's readable in the editor
+        var importer = AssetImporter.GetAtPath(path) as TextureImporter;
+        if (importer != null && !importer.isReadable)
+        {
+            importer.isReadable = true;
+            importer.SaveAndReimport();
+            tex = AssetDatabase.LoadAssetAtPath<Texture2D>(path);
+        }
+
+        // Scale to TileSize if needed
+        if (tex.width != TileSize || tex.height != TileSize)
+        {
+            var scaled = new Texture2D(TileSize, TileSize, TextureFormat.RGBA32, false);
+            var src    = tex.GetPixels32();
+            var dst    = new Color32[TileSize * TileSize];
+            for (int y = 0; y < TileSize; y++)
+            for (int x = 0; x < TileSize; x++)
+            {
+                int sx = x * tex.width  / TileSize;
+                int sy = y * tex.height / TileSize;
+                dst[x + y * TileSize] = src[sx + sy * tex.width];
+            }
+            scaled.SetPixels32(dst);
+            scaled.Apply();
+            return scaled;
+        }
+
+        return tex;
+    }
+
+    /// <summary>Generates a simple procedural texture with pixel-art noise.</summary>
+    private static Texture2D GenerateFallback(string name, Color32 baseCol)
+    {
+        var tex    = new Texture2D(TileSize, TileSize, TextureFormat.RGBA32, false);
+        var pixels = new Color32[TileSize * TileSize];
+        var rng    = new System.Random(name.GetHashCode());
+
+        for (int y = 0; y < TileSize; y++)
+        for (int x = 0; x < TileSize; x++)
+        {
+            float v = (float)(rng.NextDouble() * 2.0 - 1.0) * Variation(name);
+            pixels[x + y * TileSize] = Tint(baseCol, 1f + v);
+        }
+
+        // Extra detail pass for specific block types
+        if (name == "grass")
+        {
+            // Darker stripes to suggest blades
+            for (int y = 0; y < TileSize; y++)
+            for (int x = 0; x < TileSize; x++)
+                if ((x + y * 3) % 5 == 0)
+                    pixels[x + y * TileSize] = Tint(baseCol, 0.75f);
+        }
+        else if (name == "stone")
+        {
+            // Crack lines
+            for (int y = 0; y < TileSize; y++)
+            for (int x = 0; x < TileSize; x++)
+                if ((x * 2 + y) % 7 == 0)
+                    pixels[x + y * TileSize] = Tint(baseCol, 0.70f);
+        }
+        else if (name == "sandstone")
+        {
+            // Horizontal strata
+            for (int y = 0; y < TileSize; y++)
+            for (int x = 0; x < TileSize; x++)
+                if (y % 4 == 0)
+                    pixels[x + y * TileSize] = Tint(baseCol, 0.78f);
+        }
+        else if (name == "dirt")
+        {
+            // Pebble dots
+            for (int y = 0; y < TileSize; y++)
+            for (int x = 0; x < TileSize; x++)
+                if ((x * 3 + y * 7) % 11 == 0)
+                    pixels[x + y * TileSize] = Tint(baseCol, 0.65f);
+        }
+        else if (name == "frozendirt")
+        {
+            // Ice vein lines
+            for (int y = 0; y < TileSize; y++)
+            for (int x = 0; x < TileSize; x++)
+                if ((x + y * 2) % 6 == 0)
+                    pixels[x + y * TileSize] = new Color32(160, 200, 220, 255);
+        }
+
+        tex.SetPixels32(pixels);
         tex.Apply();
         return tex;
     }
 
-    private static void SaveTexture(Texture2D tex, string path)
+    private static float Variation(string name) => name switch
     {
-        byte[] png = tex.EncodeToPNG();
-        File.WriteAllBytes(path, png);
-        AssetDatabase.ImportAsset(path);
+        "water" or "snow" => 0.04f,
+        "sand"            => 0.07f,
+        "stone"           => 0.12f,
+        "sandstone"       => 0.10f,
+        _                 => 0.10f,
+    };
 
-        // Disable compression / mips so the single pixels are preserved exactly
-        var importer = (TextureImporter)AssetImporter.GetAtPath(path);
-        if (importer != null)
-        {
-            importer.textureType        = TextureImporterType.Default;
-            importer.filterMode         = FilterMode.Point;
-            importer.mipmapEnabled      = false;
-            importer.wrapMode           = TextureWrapMode.Clamp;
-            importer.textureCompression = TextureImporterCompression.Uncompressed;
-            importer.SaveAndReimport();
-        }
-    }
+    private static Color32 Tint(Color32 c, float t) => new Color32(
+        (byte)Mathf.Clamp(c.r * t, 0, 255),
+        (byte)Mathf.Clamp(c.g * t, 0, 255),
+        (byte)Mathf.Clamp(c.b * t, 0, 255),
+        255);
 
-    private static Material BuildMaterial(Texture2D atlas)
+    // ── Material ──────────────────────────────────────────────────────────────
+
+    private static Material BuildMaterial(Texture2DArray arr)
     {
-        var shader = Shader.Find("Universal Render Pipeline/Lit");
+        var shader = Shader.Find(ShaderPath);
         if (shader == null)
-            shader = Shader.Find("Standard");
+        {
+            Debug.LogError($"[VoxelMaterialGenerator] Shader '{ShaderPath}' not found. " +
+                           "Make sure Assets/Voxel/Shaders/VoxelTerrain.shader is in the project.");
+            shader = Shader.Find("Universal Render Pipeline/Lit");
+        }
 
         var mat = new Material(shader) { name = "VoxelTerrain" };
-        mat.mainTexture = atlas;
+        mat.SetTexture("_TexArray", arr);
+        mat.SetFloat("_Smoothness", 0f);
 
-        // ── Force fully opaque rendering ──────────────────────────────────────
-        // URP Lit created programmatically does not set these correctly by default,
-        // causing ZWrite=Off / transparent blending → large triangular Z-fighting.
-        if (mat.HasProperty("_Surface"))   mat.SetFloat("_Surface",  0f); // 0 = Opaque
-        if (mat.HasProperty("_Blend"))     mat.SetFloat("_Blend",    0f); // Alpha mode
-        if (mat.HasProperty("_SrcBlend"))  mat.SetInt("_SrcBlend",   1);  // BlendMode.One
-        if (mat.HasProperty("_DstBlend"))  mat.SetInt("_DstBlend",   0);  // BlendMode.Zero
-        if (mat.HasProperty("_ZWrite"))    mat.SetInt("_ZWrite",     1);  // ZWrite On
-        if (mat.HasProperty("_Cull"))      mat.SetInt("_Cull",       2);  // CullMode.Back
-        mat.renderQueue = 2000; // RenderQueue.Geometry
-
-        mat.DisableKeyword("_SURFACE_TYPE_TRANSPARENT");
-        mat.DisableKeyword("_ALPHATEST_ON");
-        mat.DisableKeyword("_ALPHABLEND_ON");
-        mat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-        mat.EnableKeyword("_EMISSION"); // suppress shader variant warnings
-
-        // Smooth = 0, Metallic = 0 for a matte voxel look
-        if (mat.HasProperty("_Smoothness")) mat.SetFloat("_Smoothness", 0f);
-        if (mat.HasProperty("_Metallic"))   mat.SetFloat("_Metallic",   0f);
+        mat.renderQueue = 2000;
         return mat;
     }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static void EnsureFolder()
     {

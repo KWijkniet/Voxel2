@@ -180,6 +180,7 @@ public class VoxelWorld : MonoBehaviour
         public NativeList<float3>  MeshVerts;
         public NativeList<float3>  MeshNorms;
         public NativeList<float2>  MeshUVs;
+        public NativeList<float2>  MeshUV2s;
         public NativeList<int>     MeshTris;
 
         public bool BuildMesh;
@@ -259,6 +260,7 @@ public class VoxelWorld : MonoBehaviour
                 if (p.MeshVerts.IsCreated) p.MeshVerts.Dispose();
                 if (p.MeshNorms.IsCreated) p.MeshNorms.Dispose();
                 if (p.MeshUVs.IsCreated)   p.MeshUVs.Dispose();
+                if (p.MeshUV2s.IsCreated)  p.MeshUV2s.Dispose();
                 if (p.MeshTris.IsCreated)  p.MeshTris.Dispose();
             }
         }
@@ -642,6 +644,7 @@ public class VoxelWorld : MonoBehaviour
             var verts = new NativeList<float3>(4096, Allocator.Persistent);
             var norms = new NativeList<float3>(4096, Allocator.Persistent);
             var uvs   = new NativeList<float2>(4096, Allocator.Persistent);
+            var uv2s  = new NativeList<float2>(4096, Allocator.Persistent);
             var tris  = new NativeList<int>   (6144, Allocator.Persistent);
 
             var meshJob = new BuildChunkMeshJob
@@ -655,6 +658,7 @@ public class VoxelWorld : MonoBehaviour
                 Vertices      = verts,
                 Normals       = norms,
                 UVs           = uvs,
+                UV2s          = uv2s,
                 Triangles     = tris,
             };
             var meshHandle = meshJob.Schedule(terrainHandle);
@@ -669,6 +673,7 @@ public class VoxelWorld : MonoBehaviour
                 MeshVerts          = verts,
                 MeshNorms          = norms,
                 MeshUVs            = uvs,
+                MeshUV2s           = uv2s,
                 MeshTris           = tris,
                 BuildMesh          = true,
             });
@@ -781,13 +786,15 @@ public class VoxelWorld : MonoBehaviour
         md.SetVertexBufferParams(p.MeshVerts.Length,
             new VertexAttributeDescriptor(VertexAttribute.Position,  VertexAttributeFormat.Float32, 3, stream: 0),
             new VertexAttributeDescriptor(VertexAttribute.Normal,    VertexAttributeFormat.Float32, 3, stream: 1),
-            new VertexAttributeDescriptor(VertexAttribute.TexCoord0, VertexAttributeFormat.Float32, 2, stream: 2));
+            new VertexAttributeDescriptor(VertexAttribute.TexCoord0, VertexAttributeFormat.Float32, 2, stream: 2),
+            new VertexAttributeDescriptor(VertexAttribute.TexCoord1, VertexAttributeFormat.Float32, 2, stream: 3));
         md.SetIndexBufferParams(p.MeshTris.Length, use32 ? IndexFormat.UInt32 : IndexFormat.UInt16);
 
         // NativeList.AsArray() is a zero-copy view; CopyFrom is a native memcpy
         md.GetVertexData<float3>(0).CopyFrom(p.MeshVerts.AsArray());
         md.GetVertexData<float3>(1).CopyFrom(p.MeshNorms.AsArray());
         md.GetVertexData<float2>(2).CopyFrom(p.MeshUVs.AsArray());
+        md.GetVertexData<float2>(3).CopyFrom(p.MeshUV2s.AsArray());
 
         if (use32)
         {
@@ -820,6 +827,7 @@ public class VoxelWorld : MonoBehaviour
         if (p.MeshVerts.IsCreated) p.MeshVerts.Dispose();
         if (p.MeshNorms.IsCreated) p.MeshNorms.Dispose();
         if (p.MeshUVs.IsCreated)   p.MeshUVs.Dispose();
+        if (p.MeshUV2s.IsCreated)  p.MeshUV2s.Dispose();
         if (p.MeshTris.IsCreated)  p.MeshTris.Dispose();
     }
 
