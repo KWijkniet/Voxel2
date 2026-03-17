@@ -92,6 +92,44 @@ public class VoxelWorld : MonoBehaviour
     [Range(0, 3)]
     public int lodLevels = 2;
 
+    [Header("Terrain V2")]
+    [Tooltip("Use the 5-channel spline terrain generator instead of the classic FBM generator.")]
+    public bool useV2Generator = false;
+
+    [Header("Terrain V2 — Core")]
+    public int   v2SeaLevel     = 20;
+    public float v2MaxAmplitude = 180f;
+
+    [Header("Terrain V2 — Frequencies")]
+    public float v2CScale    = 0.0003f;
+    public float v2EScale    = 0.001f;
+    public float v2PVScale   = 0.003f;
+    public float v2TScale    = 0.0008f;
+    public float v2HScale    = 0.0008f;
+    [Range(1, 8)]
+    public int   v2PVOctaves = 5;
+
+    [Header("Terrain V2 — Rivers")]
+    public float v2RiverThreshold  = 0.04f;
+    public float v2RiverMaskScale  = 0.0006f;
+    public int   v2RiverCarveDepth = 6;
+    public float v2RiverErosionMin = 0.35f;
+
+    [Header("Terrain V2 — Terrace Cliffs")]
+    public float v2TerraceStep        = 0f;
+    public float v2TerraceErosionMin  = 0.3f;
+    public float v2TerraceErosionMax  = 0.6f;
+
+    [Header("Terrain V2 — Splines")]
+    [Tooltip("Continentalness (C) → base height offset. X = C value [-1..1], Y = height offset (voxels).")]
+    public Vector2[] v2CSplinePoints;
+    [Tooltip("Erosion (E) → PV height scale. X = E value [0..1], Y = scale [0..1].")]
+    public Vector2[] v2ESplinePoints;
+
+    [Header("Terrain V2 — Biomes")]
+    [Tooltip("Biome definitions. Leave empty to use built-in defaults.")]
+    public BiomeDef[] v2Biomes;
+
     // ── Derived ───────────────────────────────────────────────────────────────
 
     public int AlignedViewDistance
@@ -118,6 +156,12 @@ public class VoxelWorld : MonoBehaviour
     // Desired coords that are neither meshed nor in-flight. Kept in sync incrementally
     // so GatherAndSortLOD0 iterates only actionable work instead of all desiredCoords.
     private readonly HashSet<Vector3Int>                  _pendingCoords  = new();
+
+    // ── V2 generator NativeArrays (Persistent, allocated in Start, disposed in OnDestroy) ──
+
+    private NativeArray<float2>   _v2CSpline;
+    private NativeArray<float2>   _v2ESpline;
+    private NativeArray<BiomeDef> _v2Biomes;
 
     // ── LOD 0 pipeline (terrain IJob → mesh IJob, chained) ───────────────────
 
@@ -242,6 +286,13 @@ public class VoxelWorld : MonoBehaviour
 
     // ── Unity ─────────────────────────────────────────────────────────────────
 
+    private void Reset()
+    {
+        // Called when the component is first added; sets V2 spline defaults in the Inspector.
+        v2CSplinePoints = SplineUtils.DefaultContinentalnessSpline;
+        v2ESplinePoints = SplineUtils.DefaultErosionSpline;
+    }
+
     private void Start()
     {
         _regionSemaphore = new SemaphoreSlim(maxRegionTasks, maxRegionTasks);
@@ -249,10 +300,33 @@ public class VoxelWorld : MonoBehaviour
         if (chunkMaterial == null)
             chunkMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
 
+        AllocateV2NativeArrays();
+
         _lastLodLevels    = lodLevels;
         _lastViewDistance = viewDistance;
         _lastPlayerChunk  = WorldToChunkCoord(player != null ? player.position : Vector3.zero);
         UpdateLoadedChunks(true);
+    }
+
+    private void AllocateV2NativeArrays()
+    {
+        var cPts = (v2CSplinePoints != null && v2CSplinePoints.Length > 0)
+            ? v2CSplinePoints : SplineUtils.DefaultContinentalnessSpline;
+        var ePts = (v2ESplinePoints != null && v2ESplinePoints.Length > 0)
+            ? v2ESplinePoints : SplineUtils.DefaultErosionSpline;
+
+        _v2CSpline = new NativeArray<float2>(cPts.Length, Allocator.Persistent);
+        for (int i = 0; i < cPts.Length; i++)
+            _v2CSpline[i] = new float2(cPts[i].x, cPts[i].y);
+
+        _v2ESpline = new NativeArray<float2>(ePts.Length, Allocator.Persistent);
+        for (int i = 0; i < ePts.Length; i++)
+            _v2ESpline[i] = new float2(ePts[i].x, ePts[i].y);
+
+        var biomes = (v2Biomes != null && v2Biomes.Length > 0)
+            ? v2Biomes : BiomeDef.CreateDefaults();
+        _v2Biomes  = new NativeArray<BiomeDef>(biomes.Length, Allocator.Persistent);
+        _v2Biomes.CopyFrom(biomes);
     }
 
     private void OnDestroy()
@@ -305,6 +379,10 @@ public class VoxelWorld : MonoBehaviour
         foreach (var kvp in _transRegionMeshes) if (kvp.Value != null) Destroy(kvp.Value);
         _staleChunkMeshes.Clear();  _staleRegionMeshes.Clear();
         _transChunkMeshes.Clear();  _transRegionMeshes.Clear();
+
+        if (_v2CSpline.IsCreated) _v2CSpline.Dispose();
+        if (_v2ESpline.IsCreated) _v2ESpline.Dispose();
+        if (_v2Biomes.IsCreated)  _v2Biomes.Dispose();
     }
 
     private void Update()
@@ -646,16 +724,36 @@ public class VoxelWorld : MonoBehaviour
             batch.Coords[i] = new int3(coords[offset + i].x, coords[offset + i].y, coords[offset + i].z);
         }
 
-        var terrainJob = new GenerateChunksBatchJob
+        JobHandle terrainHandle;
+        if (useV2Generator)
         {
-            Settings           = settings,
-            Coords             = batch.Coords,
-            LowDetail          = !buildMesh,
-            AllBlocks          = batch.Data,
-            SurfaceCache       = batch.SurfaceCache,
-            SurfaceCacheWriter = batch.SurfaceCache.AsParallelWriter(),
-        };
-        var terrainHandle = terrainJob.Schedule(count, 1);
+            var terrainJob = new GenerateChunksBatchJobV2
+            {
+                Settings           = GetTerrainSettingsV2(),
+                Coords             = batch.Coords,
+                LowDetail          = !buildMesh,
+                AllBlocks          = batch.Data,
+                SurfaceCache       = batch.SurfaceCache,
+                SurfaceCacheWriter = batch.SurfaceCache.AsParallelWriter(),
+                CSpline            = _v2CSpline,
+                ESpline            = _v2ESpline,
+                Biomes             = _v2Biomes,
+            };
+            terrainHandle = terrainJob.Schedule(count, 1);
+        }
+        else
+        {
+            var terrainJob = new GenerateChunksBatchJob
+            {
+                Settings           = settings,
+                Coords             = batch.Coords,
+                LowDetail          = !buildMesh,
+                AllBlocks          = batch.Data,
+                SurfaceCache       = batch.SurfaceCache,
+                SurfaceCacheWriter = batch.SurfaceCache.AsParallelWriter(),
+            };
+            terrainHandle = terrainJob.Schedule(count, 1);
+        }
         // batch.Coords is Persistent — disposed by BatchBuffer.Release() when all pipelines complete
 
         for (int i = 0; i < count; i++)
@@ -1154,6 +1252,25 @@ public class VoxelWorld : MonoBehaviour
         snowAltitude           = snowAltitude,
         desertSandDepth        = desertSandDepth,
         tundraFrozenDepth      = tundraFrozenDepth,
+    };
+
+    public TerrainSettingsV2 GetTerrainSettingsV2() => new TerrainSettingsV2
+    {
+        SeaLevel           = v2SeaLevel,
+        MaxAmplitude       = v2MaxAmplitude,
+        CScale             = v2CScale,
+        EScale             = v2EScale,
+        PVScale            = v2PVScale,
+        TScale             = v2TScale,
+        HScale             = v2HScale,
+        PVOctaves          = v2PVOctaves,
+        RiverThreshold     = v2RiverThreshold,
+        RiverMaskScale     = v2RiverMaskScale,
+        RiverCarveDepth    = v2RiverCarveDepth,
+        RiverErosionMin    = v2RiverErosionMin,
+        TerraceStep        = v2TerraceStep,
+        TerraceErosionMin  = v2TerraceErosionMin,
+        TerraceErosionMax  = v2TerraceErosionMax,
     };
 
     // ── Public API ────────────────────────────────────────────────────────────

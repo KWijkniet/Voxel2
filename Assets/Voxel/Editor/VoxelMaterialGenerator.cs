@@ -12,7 +12,7 @@ using UnityEditor;
 /// Drop 16×16 (or any power-of-2) PNGs into Assets/Voxel/Textures/ named
 /// stone, dirt, grass, sand, water, snow, sandstone, frozendirt to use your own art.
 ///
-/// Atlas layout: [Stone | Dirt | Grass | Sand | Water | Snow | Sandstone | FrozenDirt]
+/// Atlas layout: [Stone | Dirt | Grass | Sand | Water | Snow | Sandstone | FrozenDirt | Ice | PackedIce]
 /// </summary>
 public static class VoxelMaterialGenerator
 {
@@ -36,6 +36,8 @@ public static class VoxelMaterialGenerator
         ("snow",      new Color32(220, 235, 255, 255)),
         ("sandstone", new Color32(210, 180,  90, 255)),
         ("frozendirt",new Color32(100,  95, 110, 255)),
+        ("ice",       new Color32(160, 215, 240, 255)),
+        ("packedice", new Color32(100, 170, 210, 255)),
     };
 
     /// <summary>Generates and returns (opaqueMaterial, transparentMaterial).</summary>

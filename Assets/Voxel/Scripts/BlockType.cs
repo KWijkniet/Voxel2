@@ -9,10 +9,12 @@ public static class BlockType
     public const byte Snow       = 6;
     public const byte Sandstone  = 7;
     public const byte FrozenDirt = 8;
+    public const byte Ice        = 9;
+    public const byte PackedIce  = 10;
 
     // Number of solid block types in the texture atlas (Air is not in the atlas).
-    // Atlas layout: [Stone | Dirt | Grass | Sand | Water | Snow | Sandstone | FrozenDirt]
-    public const int AtlasTileCount = 8;
+    // Atlas layout: [Stone | Dirt | Grass | Sand | Water | Snow | Sandstone | FrozenDirt | Ice | PackedIce]
+    public const int AtlasTileCount = 10;
 
     /// <summary>
     /// Returns true for block types that use alpha blending (water, glass, leaves, …).
