@@ -13,4 +13,10 @@ public static class BlockType
     // Number of solid block types in the texture atlas (Air is not in the atlas).
     // Atlas layout: [Stone | Dirt | Grass | Sand | Water | Snow | Sandstone | FrozenDirt]
     public const int AtlasTileCount = 8;
+
+    /// <summary>
+    /// Returns true for block types that use alpha blending (water, glass, leaves, …).
+    /// Add new transparent types here; the meshers and renderer pick up the change automatically.
+    /// </summary>
+    public static bool IsTransparent(byte b) => b == Water;
 }

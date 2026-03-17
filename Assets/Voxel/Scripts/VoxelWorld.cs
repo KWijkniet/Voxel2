@@ -71,6 +71,7 @@ public class VoxelWorld : MonoBehaviour
 
     [Header("Rendering")]
     public Material chunkMaterial;
+    public Material transparentMaterial;
 
     [Header("Performance")]
     [Tooltip("Max LOD 0 chunk pipelines (terrain+mesh jobs) in flight at once. " +
@@ -104,9 +105,12 @@ public class VoxelWorld : MonoBehaviour
 
     // VoxelChunk wraps a Persistent NativeArray<byte>. We own the lifetime.
     private readonly Dictionary<Vector3Int, VoxelChunk> _chunks      = new();
-    private readonly Dictionary<Vector3Int, Mesh>        _chunkMeshes = new();
-    private readonly List<(Mesh mesh, Matrix4x4 trs)>    _chunkDrawList   = new();
-    private readonly List<(Mesh mesh, Matrix4x4 trs)>    _regionDrawList  = new();
+    private readonly Dictionary<Vector3Int, Mesh>        _chunkMeshes      = new();
+    private readonly Dictionary<Vector3Int, Mesh>        _transChunkMeshes = new();
+    private readonly List<(Mesh mesh, Matrix4x4 trs)>    _chunkDrawList        = new();
+    private readonly List<(Mesh mesh, Matrix4x4 trs)>    _transChunkDrawList   = new();
+    private readonly List<(Mesh mesh, Matrix4x4 trs)>    _regionDrawList       = new();
+    private readonly List<(Mesh mesh, Matrix4x4 trs)>    _transRegionDrawList  = new();
     private bool         _drawListDirty   = true;
     private Matrix4x4    _cachedL2W       = Matrix4x4.zero;
     private readonly HashSet<Vector3Int>                  _desiredCoords  = new();
@@ -186,6 +190,12 @@ public class VoxelWorld : MonoBehaviour
         public NativeList<float2>  MeshUVs;
         public NativeList<float2>  MeshUV2s;
         public NativeList<int>     MeshTris;
+        // Transparent geometry (water, glass, …)
+        public NativeList<float3>  TransVerts;
+        public NativeList<float3>  TransNorms;
+        public NativeList<float2>  TransUVs;
+        public NativeList<float2>  TransUV2s;
+        public NativeList<int>     TransTris;
 
         public bool BuildMesh;
         public bool Discarded;
@@ -208,7 +218,8 @@ public class VoxelWorld : MonoBehaviour
     // ── LOD 1+ storage (regions) ──────────────────────────────────────────────
 
     private readonly Dictionary<Vector3Int, RegionData>  _regions          = new();
-    private readonly Dictionary<Vector3Int, Mesh>         _regionMeshes     = new();
+    private readonly Dictionary<Vector3Int, Mesh>         _regionMeshes      = new();
+    private readonly Dictionary<Vector3Int, Mesh>         _transRegionMeshes = new();
     private readonly Dictionary<Vector3Int, Mesh>         _staleRegionMeshes = new();
     private readonly Dictionary<Vector3Int, Mesh>         _staleChunkMeshes  = new();
     private readonly HashSet<Vector3Int>                  _desiredRegions   = new();
@@ -220,7 +231,9 @@ public class VoxelWorld : MonoBehaviour
     {
         public readonly Vector3Int       RegionCoord;
         public readonly WritableMeshData MeshData;
-        public RegionBuildResult(Vector3Int r, WritableMeshData m) { RegionCoord = r; MeshData = m; }
+        public readonly WritableMeshData TransMeshData;
+        public RegionBuildResult(Vector3Int r, WritableMeshData m, WritableMeshData t)
+        { RegionCoord = r; MeshData = m; TransMeshData = t; }
     }
 
     private SemaphoreSlim           _regionSemaphore;
@@ -267,6 +280,11 @@ public class VoxelWorld : MonoBehaviour
                 if (p.MeshUVs.IsCreated)   p.MeshUVs.Dispose();
                 if (p.MeshUV2s.IsCreated)  p.MeshUV2s.Dispose();
                 if (p.MeshTris.IsCreated)  p.MeshTris.Dispose();
+                if (p.TransVerts.IsCreated) p.TransVerts.Dispose();
+                if (p.TransNorms.IsCreated) p.TransNorms.Dispose();
+                if (p.TransUVs.IsCreated)   p.TransUVs.Dispose();
+                if (p.TransUV2s.IsCreated)  p.TransUV2s.Dispose();
+                if (p.TransTris.IsCreated)  p.TransTris.Dispose();
             }
         }
         foreach (var b in batchesToDispose)
@@ -283,8 +301,10 @@ public class VoxelWorld : MonoBehaviour
 
         foreach (var kvp in _staleChunkMeshes)  if (kvp.Value != null) Destroy(kvp.Value);
         foreach (var kvp in _staleRegionMeshes) if (kvp.Value != null) Destroy(kvp.Value);
-        _staleChunkMeshes.Clear();
-        _staleRegionMeshes.Clear();
+        foreach (var kvp in _transChunkMeshes)  if (kvp.Value != null) Destroy(kvp.Value);
+        foreach (var kvp in _transRegionMeshes) if (kvp.Value != null) Destroy(kvp.Value);
+        _staleChunkMeshes.Clear();  _staleRegionMeshes.Clear();
+        _transChunkMeshes.Clear();  _transRegionMeshes.Clear();
     }
 
     private void Update()
@@ -656,26 +676,36 @@ public class VoxelWorld : MonoBehaviour
                 continue;
             }
 
-            var snapshots = SnapshotNeighbours(coord, out int neighbourMask);
-            var verts = new NativeList<float3>(4096, Allocator.Persistent);
-            var norms = new NativeList<float3>(4096, Allocator.Persistent);
-            var uvs   = new NativeList<float2>(4096, Allocator.Persistent);
-            var uv2s  = new NativeList<float2>(4096, Allocator.Persistent);
-            var tris  = new NativeList<int>   (6144, Allocator.Persistent);
+            var snapshots  = SnapshotNeighbours(coord, out int neighbourMask);
+            var verts      = new NativeList<float3>(4096, Allocator.Persistent);
+            var norms      = new NativeList<float3>(4096, Allocator.Persistent);
+            var uvs        = new NativeList<float2>(4096, Allocator.Persistent);
+            var uv2s       = new NativeList<float2>(4096, Allocator.Persistent);
+            var tris       = new NativeList<int>   (6144, Allocator.Persistent);
+            var tVerts     = new NativeList<float3>(512,  Allocator.Persistent);
+            var tNorms     = new NativeList<float3>(512,  Allocator.Persistent);
+            var tUvs       = new NativeList<float2>(512,  Allocator.Persistent);
+            var tUv2s      = new NativeList<float2>(512,  Allocator.Persistent);
+            var tTris      = new NativeList<int>   (768,  Allocator.Persistent);
 
             var meshJob = new BuildChunkMeshJob
             {
-                Voxels        = voxels,
-                N_PX          = snapshots[0], N_NX = snapshots[1],
-                N_PY          = snapshots[2], N_NY = snapshots[3],
-                N_PZ          = snapshots[4], N_NZ = snapshots[5],
-                NeighbourMask = neighbourMask,
-                Step          = 1,
-                Vertices      = verts,
-                Normals       = norms,
-                UVs           = uvs,
-                UV2s          = uv2s,
-                Triangles     = tris,
+                Voxels         = voxels,
+                N_PX           = snapshots[0], N_NX = snapshots[1],
+                N_PY           = snapshots[2], N_NY = snapshots[3],
+                N_PZ           = snapshots[4], N_NZ = snapshots[5],
+                NeighbourMask  = neighbourMask,
+                Step           = 1,
+                Vertices       = verts,
+                Normals        = norms,
+                UVs            = uvs,
+                UV2s           = uv2s,
+                Triangles      = tris,
+                TransVertices  = tVerts,
+                TransNormals   = tNorms,
+                TransUVs       = tUvs,
+                TransUV2s      = tUv2s,
+                TransTriangles = tTris,
             };
             var meshHandle = meshJob.Schedule(terrainHandle);
 
@@ -691,6 +721,11 @@ public class VoxelWorld : MonoBehaviour
                 MeshUVs            = uvs,
                 MeshUV2s           = uv2s,
                 MeshTris           = tris,
+                TransVerts         = tVerts,
+                TransNorms         = tNorms,
+                TransUVs           = tUvs,
+                TransUV2s          = tUv2s,
+                TransTris          = tTris,
                 BuildMesh          = true,
             });
         }
@@ -769,7 +804,8 @@ public class VoxelWorld : MonoBehaviour
             // Apply mesh (or null sentinel for empty/data-only)
             if (p.BuildMesh && _desiredCoords.Contains(p.Coord) && !_chunkMeshes.ContainsKey(p.Coord))
             {
-                _chunkMeshes[p.Coord] = CreateMeshFromLists(ref p);
+                _chunkMeshes[p.Coord]      = CreateMeshFromLists(ref p, transparent: false);
+                _transChunkMeshes[p.Coord] = CreateMeshFromLists(ref p, transparent: true);
                 // Remove same-coord stale chunk
                 if (_staleChunkMeshes.TryGetValue(p.Coord, out var stale))
                 { Destroy(stale); _staleChunkMeshes.Remove(p.Coord); }
@@ -800,64 +836,67 @@ public class VoxelWorld : MonoBehaviour
         return anyApplied;
     }
 
-    private static Mesh CreateMeshFromLists(ref ChunkPipeline p)
+    // transparent=false → opaque lists; transparent=true → trans lists.
+    // Disposes all lists (both opaque and trans) when transparent=true (called second).
+    private static Mesh CreateMeshFromLists(ref ChunkPipeline p, bool transparent)
     {
-        if (!p.MeshVerts.IsCreated || p.MeshVerts.Length == 0)
+        var srcVerts = transparent ? p.TransVerts : p.MeshVerts;
+        var srcNorms = transparent ? p.TransNorms : p.MeshNorms;
+        var srcUVs   = transparent ? p.TransUVs   : p.MeshUVs;
+        var srcUV2s  = transparent ? p.TransUV2s  : p.MeshUV2s;
+        var srcTris  = transparent ? p.TransTris  : p.MeshTris;
+
+        Mesh mesh = null;
+        if (srcVerts.IsCreated && srcVerts.Length > 0)
         {
-            DisposeMeshLists(ref p);
-            return null; // empty chunk sentinel
+            bool use32 = srcVerts.Length > ushort.MaxValue;
+            var  mda   = Mesh.AllocateWritableMeshData(1);
+            var  md    = mda[0];
+
+            md.SetVertexBufferParams(srcVerts.Length,
+                new VertexAttributeDescriptor(VertexAttribute.Position,  VertexAttributeFormat.Float32, 3, stream: 0),
+                new VertexAttributeDescriptor(VertexAttribute.Normal,    VertexAttributeFormat.Float32, 3, stream: 1),
+                new VertexAttributeDescriptor(VertexAttribute.TexCoord0, VertexAttributeFormat.Float32, 2, stream: 2),
+                new VertexAttributeDescriptor(VertexAttribute.TexCoord1, VertexAttributeFormat.Float32, 2, stream: 3));
+            md.SetIndexBufferParams(srcTris.Length, use32 ? IndexFormat.UInt32 : IndexFormat.UInt16);
+
+            md.GetVertexData<float3>(0).CopyFrom(srcVerts.AsArray());
+            md.GetVertexData<float3>(1).CopyFrom(srcNorms.AsArray());
+            md.GetVertexData<float2>(2).CopyFrom(srcUVs.AsArray());
+            md.GetVertexData<float2>(3).CopyFrom(srcUV2s.AsArray());
+
+            if (use32) { md.GetIndexData<int>().CopyFrom(srcTris.AsArray()); }
+            else { var idx = md.GetIndexData<ushort>(); for (int i = 0; i < srcTris.Length; i++) idx[i] = (ushort)srcTris[i]; }
+
+            md.subMeshCount = 1;
+            md.SetSubMesh(0, new SubMeshDescriptor(0, srcTris.Length),
+                MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+
+            mesh = new Mesh { name = transparent ? "ChunkTrans" : "Chunk" };
+            Mesh.ApplyAndDisposeWritableMeshData(mda, mesh,
+                MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+            int s = VoxelChunk.Size;
+            mesh.bounds = new Bounds(new Vector3(s * .5f, s * .5f, s * .5f), new Vector3(s, s, s));
         }
 
-        bool use32 = p.MeshVerts.Length > ushort.MaxValue;
-        var  mda   = Mesh.AllocateWritableMeshData(1);
-        var  md    = mda[0];
-
-        md.SetVertexBufferParams(p.MeshVerts.Length,
-            new VertexAttributeDescriptor(VertexAttribute.Position,  VertexAttributeFormat.Float32, 3, stream: 0),
-            new VertexAttributeDescriptor(VertexAttribute.Normal,    VertexAttributeFormat.Float32, 3, stream: 1),
-            new VertexAttributeDescriptor(VertexAttribute.TexCoord0, VertexAttributeFormat.Float32, 2, stream: 2),
-            new VertexAttributeDescriptor(VertexAttribute.TexCoord1, VertexAttributeFormat.Float32, 2, stream: 3));
-        md.SetIndexBufferParams(p.MeshTris.Length, use32 ? IndexFormat.UInt32 : IndexFormat.UInt16);
-
-        // NativeList.AsArray() is a zero-copy view; CopyFrom is a native memcpy
-        md.GetVertexData<float3>(0).CopyFrom(p.MeshVerts.AsArray());
-        md.GetVertexData<float3>(1).CopyFrom(p.MeshNorms.AsArray());
-        md.GetVertexData<float2>(2).CopyFrom(p.MeshUVs.AsArray());
-        md.GetVertexData<float2>(3).CopyFrom(p.MeshUV2s.AsArray());
-
-        if (use32)
-        {
-            md.GetIndexData<int>().CopyFrom(p.MeshTris.AsArray());
-        }
-        else
-        {
-            var idx = md.GetIndexData<ushort>();
-            for (int i = 0; i < p.MeshTris.Length; i++) idx[i] = (ushort)p.MeshTris[i];
-        }
-
-        md.subMeshCount = 1;
-        md.SetSubMesh(0, new SubMeshDescriptor(0, p.MeshTris.Length),
-            MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-
-        var mesh = new Mesh { name = "Chunk" };
-        Mesh.ApplyAndDisposeWritableMeshData(mda, mesh,
-            MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-
-        int s = VoxelChunk.Size;
-        mesh.bounds = new Bounds(new Vector3(s * .5f, s * .5f, s * .5f), new Vector3(s, s, s));
-
-        DisposeMeshLists(ref p);
+        // Dispose all lists once both meshes have been extracted (on the second call)
+        if (transparent) DisposeMeshLists(ref p);
         return mesh;
     }
 
     private static void DisposeMeshLists(ref ChunkPipeline p)
     {
         if (!p.BuildMesh) return;
-        if (p.MeshVerts.IsCreated) p.MeshVerts.Dispose();
-        if (p.MeshNorms.IsCreated) p.MeshNorms.Dispose();
-        if (p.MeshUVs.IsCreated)   p.MeshUVs.Dispose();
-        if (p.MeshUV2s.IsCreated)  p.MeshUV2s.Dispose();
-        if (p.MeshTris.IsCreated)  p.MeshTris.Dispose();
+        if (p.MeshVerts.IsCreated)  p.MeshVerts.Dispose();
+        if (p.MeshNorms.IsCreated)  p.MeshNorms.Dispose();
+        if (p.MeshUVs.IsCreated)    p.MeshUVs.Dispose();
+        if (p.MeshUV2s.IsCreated)   p.MeshUV2s.Dispose();
+        if (p.MeshTris.IsCreated)   p.MeshTris.Dispose();
+        if (p.TransVerts.IsCreated) p.TransVerts.Dispose();
+        if (p.TransNorms.IsCreated) p.TransNorms.Dispose();
+        if (p.TransUVs.IsCreated)   p.TransUVs.Dispose();
+        if (p.TransUV2s.IsCreated)  p.TransUV2s.Dispose();
+        if (p.TransTris.IsCreated)  p.TransTris.Dispose();
     }
 
     // ── Neighbour snapshots ───────────────────────────────────────────────────
@@ -933,8 +972,8 @@ public class VoxelWorld : MonoBehaviour
             catch (OperationCanceledException) { _cancelledRegions.Enqueue(regionCoord); return; }
             try
             {
-                var mesh = MeshBuilder.BuildRegionMeshData(region, neighbours, step);
-                _regionReadyQueue.Enqueue(new RegionBuildResult(regionCoord, mesh));
+                var (mesh, transMesh) = MeshBuilder.BuildRegionMeshData(region, neighbours, step);
+                _regionReadyQueue.Enqueue(new RegionBuildResult(regionCoord, mesh, transMesh));
             }
             finally { _regionSemaphore.Release(); }
         });
@@ -951,7 +990,8 @@ public class VoxelWorld : MonoBehaviour
             if (!_regionMeshes.ContainsKey(result.RegionCoord)
                 && _desiredRegions.Contains(result.RegionCoord))
             {
-                _regionMeshes[result.RegionCoord] = MeshBuilder.CreateMesh(result.MeshData);
+                _regionMeshes[result.RegionCoord]      = MeshBuilder.CreateMesh(result.MeshData);
+                _transRegionMeshes[result.RegionCoord] = MeshBuilder.CreateMesh(result.TransMeshData);
                 // Remove same-coord stale region
                 if (_staleRegionMeshes.TryGetValue(result.RegionCoord, out var stale))
                 { Destroy(stale); _staleRegionMeshes.Remove(result.RegionCoord); }
@@ -972,6 +1012,7 @@ public class VoxelWorld : MonoBehaviour
             else
             {
                 result.MeshData?.Discard();
+                result.TransMeshData?.Discard();
             }
             applied++;
         }
@@ -988,6 +1029,8 @@ public class VoxelWorld : MonoBehaviour
             if (mesh != null) _staleChunkMeshes[coord] = mesh;
             _drawListDirty = true;
         }
+        if (_transChunkMeshes.TryGetValue(coord, out var tmesh))
+        { _transChunkMeshes.Remove(coord); if (tmesh != null) Destroy(tmesh); _drawListDirty = true; }
     }
 
     private void UnloadRegionMesh(Vector3Int r)
@@ -998,6 +1041,8 @@ public class VoxelWorld : MonoBehaviour
             if (mesh != null) _staleRegionMeshes[r] = mesh;
             _drawListDirty = true;
         }
+        if (_transRegionMeshes.TryGetValue(r, out var tmesh))
+        { _transRegionMeshes.Remove(r); if (tmesh != null) Destroy(tmesh); _drawListDirty = true; }
     }
 
     private void EvictStaleMeshes()
@@ -1057,13 +1102,29 @@ public class VoxelWorld : MonoBehaviour
             foreach (var kvp in _regionMeshes)
                 if (kvp.Value != null)
                     _regionDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(RegionWorldPos(kvp.Key))));
+
+            _transChunkDrawList.Clear();
+            foreach (var kvp in _transChunkMeshes)
+                if (kvp.Value != null)
+                    _transChunkDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(ChunkToWorldPos(kvp.Key))));
+
+            _transRegionDrawList.Clear();
+            foreach (var kvp in _transRegionMeshes)
+                if (kvp.Value != null)
+                    _transRegionDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(RegionWorldPos(kvp.Key))));
         }
 
+        var transMat = transparentMaterial != null ? transparentMaterial : chunkMaterial;
         int layer = gameObject.layer;
         foreach (var (mesh, trs) in _chunkDrawList)
             Graphics.DrawMesh(mesh, trs, chunkMaterial, layer);
         foreach (var (mesh, trs) in _regionDrawList)
             Graphics.DrawMesh(mesh, trs, chunkMaterial, layer);
+        // Transparent pass — drawn after opaque so blending works correctly
+        foreach (var (mesh, trs) in _transChunkDrawList)
+            Graphics.DrawMesh(mesh, trs, transMat, layer);
+        foreach (var (mesh, trs) in _transRegionDrawList)
+            Graphics.DrawMesh(mesh, trs, transMat, layer);
     }
 
     // ── Terrain settings ──────────────────────────────────────────────────────

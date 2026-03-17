@@ -16,11 +16,12 @@ public class VoxelWorldEditor : Editor
         GUI.backgroundColor = new Color(0.4f, 0.6f, 1.0f);
         if (GUILayout.Button("Generate Material", GUILayout.Height(26)))
         {
-            var mat = VoxelMaterialGenerator.Generate();
+            var (mat, transMat) = VoxelMaterialGenerator.Generate();
             if (mat != null)
             {
                 Undo.RecordObject(world, "Generate Voxel Material");
-                world.chunkMaterial = mat;
+                world.chunkMaterial       = mat;
+                world.transparentMaterial = transMat;
                 EditorUtility.SetDirty(world);
             }
         }
@@ -74,7 +75,7 @@ public class VoxelWorldEditor : Editor
             go.transform.SetParent(world.transform, false);
             go.transform.localPosition = new Vector3(coord.x * s, coord.y * s, coord.z * s);
 
-            var meshData = MeshBuilder.BuildMeshData(kvp.Value, neighbours);
+            var (meshData, _) = MeshBuilder.BuildMeshData(kvp.Value, neighbours);
             if (meshData != null)
             {
                 var mf = go.AddComponent<MeshFilter>();

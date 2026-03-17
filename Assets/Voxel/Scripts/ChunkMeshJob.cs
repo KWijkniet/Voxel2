@@ -6,9 +6,14 @@ using Unity.Mathematics;
 /// <summary>
 /// Burst-compiled greedy mesher for a single 16³ chunk.
 ///
-/// Single-pass design: runs the greedy merge once per face direction, appending quads
-/// to NativeLists via NativeList.Add. NativeLists are pre-allocated with generous
-/// capacities so reallocation is rare in practice.
+/// Produces two sets of geometry in one pass:
+///   Vertices/Normals/UVs/UV2s/Triangles     — opaque blocks
+///   TransVertices/…/TransTriangles           — transparent blocks (water, glass, …)
+///
+/// Transparent neighbour culling rules:
+///   Opaque face  : hidden by other opaque blocks; visible through transparent.
+///   Transparent face: hidden by same block type or any opaque; visible against air
+///                     or a different transparent type.
 ///
 /// Direction index convention (matches MeshBuilder.NeighbourDirs):
 ///   0 = +X, 1 = -X, 2 = +Y, 3 = -Y, 4 = +Z, 5 = -Z
@@ -28,12 +33,19 @@ public struct BuildChunkMeshJob : IJob
     /// <summary>Voxels-per-cell: 1 for LOD 0, 2 for LOD 1, 4 for LOD 2, 8 for LOD 3.</summary>
     public int Step;
 
-    // ── Outputs (pre-allocated Persistent NativeLists) ────────────────────────
+    // ── Opaque outputs (pre-allocated Persistent NativeLists) ─────────────────
     public NativeList<float3> Vertices;
     public NativeList<float3> Normals;
-    public NativeList<float2> UVs;   // channel 0: face-local coords (0..w, 0..h) for tiling
-    public NativeList<float2> UV2s;  // channel 1: x = texture array slice (blockType - 1)
+    public NativeList<float2> UVs;
+    public NativeList<float2> UV2s;
     public NativeList<int>    Triangles;
+
+    // ── Transparent outputs ───────────────────────────────────────────────────
+    public NativeList<float3> TransVertices;
+    public NativeList<float3> TransNormals;
+    public NativeList<float2> TransUVs;
+    public NativeList<float2> TransUV2s;
+    public NativeList<int>    TransTriangles;
 
     // ── IJob ──────────────────────────────────────────────────────────────────
 
@@ -54,7 +66,6 @@ public struct BuildChunkMeshJob : IJob
     {
         int cells = Size / Step;
 
-        // Per-slice mask. Allocator.Temp = fast per-thread allocator inside Burst jobs.
         var mask = new NativeArray<byte>(cells * cells, Allocator.Temp, NativeArrayOptions.ClearMemory);
         var pos  = new int3();
 
@@ -72,26 +83,25 @@ public struct BuildChunkMeshJob : IJob
                 if (here == 0) { mask[u + v * cells] = 0; continue; }
 
                 int  neighborCell = slice + (backFace ? -1 : 1);
-                bool neighborSolid;
+                byte neighborVoxel;
 
                 if (neighborCell >= 0 && neighborCell < cells)
                 {
                     pos[sliceAxis] = neighborCell * Step;
-                    neighborSolid  = Voxels[pos.x + pos.y * Size + pos.z * Size * Size] != 0;
+                    neighborVoxel  = Voxels[pos.x + pos.y * Size + pos.z * Size * Size];
                 }
                 else
                 {
                     var nArr = NeighbourArray(dirIndex);
                     pos[sliceAxis] = neighborCell < 0 ? Size - Step : 0;
-                    neighborSolid  = nArr[pos.x + pos.y * Size + pos.z * Size * Size] != 0;
+                    neighborVoxel  = nArr[pos.x + pos.y * Size + pos.z * Size * Size];
 
-                    // Water at an unloaded boundary: hide face to prevent Z-fighting when
-                    // the neighbour later loads and renders its own water face.
+                    // Unloaded water boundary: hide face to avoid Z-fighting when neighbour loads.
                     if (here == BlockType.Water && ((NeighbourMask >> dirIndex) & 1) == 0)
-                        neighborSolid = true;
+                        neighborVoxel = BlockType.Water; // treat as same → hidden
                 }
 
-                mask[u + v * cells] = neighborSolid ? (byte)0 : here;
+                mask[u + v * cells] = IsFaceHidden(here, neighborVoxel) ? (byte)0 : here;
             }
 
             // ── Greedy merge + emit quads ─────────────────────────────────────
@@ -120,35 +130,41 @@ public struct BuildChunkMeshJob : IJob
                 var du = float3.zero; du[uAxis] = w * Step;
                 var dv = float3.zero; dv[vAxis] = h * Step;
 
-                int idx = Vertices.Length;
-                Vertices.Add(corner);
-                Vertices.Add(corner + du);
-                Vertices.Add(corner + du + dv);
-                Vertices.Add(corner + dv);
+                // Route to opaque or transparent output lists
+                bool isTrans = BlockType.IsTransparent(blockType);
+                var vList  = isTrans ? TransVertices  : Vertices;
+                var nList  = isTrans ? TransNormals   : Normals;
+                var uList  = isTrans ? TransUVs       : UVs;
+                var u2List = isTrans ? TransUV2s      : UV2s;
+                var tList  = isTrans ? TransTriangles : Triangles;
 
-                Normals.Add(normalVec); Normals.Add(normalVec);
-                Normals.Add(normalVec); Normals.Add(normalVec);
+                int idx = vList.Length;
+                vList.Add(corner);
+                vList.Add(corner + du);
+                vList.Add(corner + du + dv);
+                vList.Add(corner + dv);
 
-                // UV0: face-local coords — tile once per voxel unit, frac() in shader tiles the texture
-                UVs.Add(new float2(0, 0));
-                UVs.Add(new float2(w, 0));
-                UVs.Add(new float2(w, h));
-                UVs.Add(new float2(0, h));
+                nList.Add(normalVec); nList.Add(normalVec);
+                nList.Add(normalVec); nList.Add(normalVec);
 
-                // UV1: texture array slice index
+                uList.Add(new float2(0, 0));
+                uList.Add(new float2(w, 0));
+                uList.Add(new float2(w, h));
+                uList.Add(new float2(0, h));
+
                 float texSlice = blockType - 1;
-                UV2s.Add(new float2(texSlice, 0)); UV2s.Add(new float2(texSlice, 0));
-                UV2s.Add(new float2(texSlice, 0)); UV2s.Add(new float2(texSlice, 0));
+                u2List.Add(new float2(texSlice, 0)); u2List.Add(new float2(texSlice, 0));
+                u2List.Add(new float2(texSlice, 0)); u2List.Add(new float2(texSlice, 0));
 
                 if (backFace)
                 {
-                    Triangles.Add(idx);   Triangles.Add(idx+2); Triangles.Add(idx+1);
-                    Triangles.Add(idx);   Triangles.Add(idx+3); Triangles.Add(idx+2);
+                    tList.Add(idx);   tList.Add(idx+2); tList.Add(idx+1);
+                    tList.Add(idx);   tList.Add(idx+3); tList.Add(idx+2);
                 }
                 else
                 {
-                    Triangles.Add(idx);   Triangles.Add(idx+1); Triangles.Add(idx+2);
-                    Triangles.Add(idx);   Triangles.Add(idx+2); Triangles.Add(idx+3);
+                    tList.Add(idx);   tList.Add(idx+1); tList.Add(idx+2);
+                    tList.Add(idx);   tList.Add(idx+2); tList.Add(idx+3);
                 }
 
                 for (int vv = 0; vv < h; vv++)
@@ -160,6 +176,17 @@ public struct BuildChunkMeshJob : IJob
         }
 
         mask.Dispose();
+    }
+
+    // Returns true when a face between `here` and `neighbor` should be culled.
+    private static bool IsFaceHidden(byte here, byte neighbor)
+    {
+        if (neighbor == BlockType.Air) return false;
+        if (BlockType.IsTransparent(here))
+            // Transparent: hidden by same block type or any opaque block
+            return neighbor == here || !BlockType.IsTransparent(neighbor);
+        // Opaque: hidden by other opaque blocks; transparent neighbours are see-through
+        return !BlockType.IsTransparent(neighbor);
     }
 
     private NativeArray<byte> NeighbourArray(int dirIndex)

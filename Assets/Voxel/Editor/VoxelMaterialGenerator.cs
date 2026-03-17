@@ -16,10 +16,12 @@ using UnityEditor;
 /// </summary>
 public static class VoxelMaterialGenerator
 {
-    private const string OutputFolder   = "Assets/Voxel/Generated";
-    private const string TextureArrPath = OutputFolder + "/VoxelTexArray.asset";
-    private const string MaterialPath   = OutputFolder + "/VoxelTerrain.mat";
-    private const string ShaderPath     = "Voxel/VoxelTerrain";
+    private const string OutputFolder        = "Assets/Voxel/Generated";
+    private const string TextureArrPath     = OutputFolder + "/VoxelTexArray.asset";
+    private const string MaterialPath       = OutputFolder + "/VoxelTerrain.mat";
+    private const string TransMaterialPath  = OutputFolder + "/VoxelTransparent.mat";
+    private const string ShaderPath         = "Voxel/VoxelTerrain";
+    private const string TransShaderPath    = "Voxel/VoxelTransparent";
     private const string TextureFolder  = "Assets/Voxel/Textures";
     private const int    TileSize       = 16;
 
@@ -36,22 +38,27 @@ public static class VoxelMaterialGenerator
         ("frozendirt",new Color32(100,  95, 110, 255)),
     };
 
-    public static Material Generate()
+    /// <summary>Generates and returns (opaqueMaterial, transparentMaterial).</summary>
+    public static (Material opaque, Material transparent) Generate()
     {
         EnsureFolder();
 
         var arr = BuildTextureArray();
         AssetDatabase.CreateAsset(arr, TextureArrPath);
 
-        var mat = BuildMaterial(arr);
-        AssetDatabase.CreateAsset(mat, MaterialPath);
+        var mat      = BuildMaterial(arr, ShaderPath,      MaterialPath);
+        var transMat = BuildMaterial(arr, TransShaderPath, TransMaterialPath);
+        AssetDatabase.CreateAsset(mat,      MaterialPath);
+        AssetDatabase.CreateAsset(transMat, TransMaterialPath);
 
         AssetDatabase.SaveAssets();
         AssetDatabase.Refresh();
 
-        Debug.Log($"[VoxelMaterialGenerator] Texture array → {TextureArrPath}\n" +
-                  $"                         Material       → {MaterialPath}");
-        return AssetDatabase.LoadAssetAtPath<Material>(MaterialPath);
+        Debug.Log($"[VoxelMaterialGenerator] Texture array  → {TextureArrPath}\n" +
+                  $"                         Opaque mat     → {MaterialPath}\n" +
+                  $"                         Transparent mat→ {TransMaterialPath}");
+        return (AssetDatabase.LoadAssetAtPath<Material>(MaterialPath),
+                AssetDatabase.LoadAssetAtPath<Material>(TransMaterialPath));
     }
 
     // ── Texture array ─────────────────────────────────────────────────────────
@@ -125,12 +132,15 @@ public static class VoxelMaterialGenerator
         var tex    = new Texture2D(TileSize, TileSize, TextureFormat.RGBA32, false);
         var pixels = new Color32[TileSize * TileSize];
         var rng    = new System.Random(name.GetHashCode());
+        // Transparent block types get partial alpha so the shader can blend them
+        byte baseAlpha = name == "water" ? (byte)160 : (byte)255;
 
         for (int y = 0; y < TileSize; y++)
         for (int x = 0; x < TileSize; x++)
         {
             float v = (float)(rng.NextDouble() * 2.0 - 1.0) * Variation(name);
-            pixels[x + y * TileSize] = Tint(baseCol, 1f + v);
+            var c = Tint(baseCol, 1f + v);
+            pixels[x + y * TileSize] = new Color32(c.r, c.g, c.b, baseAlpha);
         }
 
         // Extra detail pass for specific block types
@@ -197,21 +207,20 @@ public static class VoxelMaterialGenerator
 
     // ── Material ──────────────────────────────────────────────────────────────
 
-    private static Material BuildMaterial(Texture2DArray arr)
+    private static Material BuildMaterial(Texture2DArray arr, string shaderPath, string assetPath)
     {
-        var shader = Shader.Find(ShaderPath);
+        var shader = Shader.Find(shaderPath);
         if (shader == null)
         {
-            Debug.LogError($"[VoxelMaterialGenerator] Shader '{ShaderPath}' not found. " +
-                           "Make sure Assets/Voxel/Shaders/VoxelTerrain.shader is in the project.");
+            Debug.LogError($"[VoxelMaterialGenerator] Shader '{shaderPath}' not found.");
             shader = Shader.Find("Universal Render Pipeline/Lit");
         }
 
-        var mat = new Material(shader) { name = "VoxelTerrain" };
+        bool isTransparent = shaderPath == TransShaderPath;
+        var mat = new Material(shader) { name = isTransparent ? "VoxelTransparent" : "VoxelTerrain" };
         mat.SetTexture("_TexArray", arr);
         mat.SetFloat("_Smoothness", 0f);
-
-        mat.renderQueue = 2000;
+        mat.renderQueue = isTransparent ? 3000 : 2000;
         return mat;
     }
 
