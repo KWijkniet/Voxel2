@@ -116,6 +116,12 @@ public class VoxelWorld : MonoBehaviour
         /// TempJob 4-frame lifetime warnings when the terrain job doesn't complete quickly.
         /// </summary>
         public NativeArray<int3> Coords;
+        /// <summary>
+        /// Per-batch surface height cache. Scoped to this batch's lifetime so capacity never
+        /// accumulates across player movement. Sized for count × 18 × 18 columns (16³ chunk
+        /// plus a 1-voxel border on each face) with 2× headroom for the hash map load factor.
+        /// </summary>
+        public NativeParallelHashMap<long, int> SurfaceCache;
         public int Pending;
 
         public BatchBuffer(int count)
@@ -124,14 +130,16 @@ public class VoxelWorld : MonoBehaviour
                                             NativeArrayOptions.UninitializedMemory);
             Coords  = new NativeArray<int3>(count, Allocator.Persistent,
                                             NativeArrayOptions.UninitializedMemory);
+            SurfaceCache = new NativeParallelHashMap<long, int>(count * 18 * 18 * 2, Allocator.Persistent);
             Pending = count;
         }
 
         public void Release()
         {
             if (--Pending > 0) return;
-            if (Data.IsCreated)   Data.Dispose();
-            if (Coords.IsCreated) Coords.Dispose();
+            if (Data.IsCreated)         Data.Dispose();
+            if (Coords.IsCreated)       Coords.Dispose();
+            if (SurfaceCache.IsCreated) SurfaceCache.Dispose();
         }
     }
 
@@ -204,28 +212,11 @@ public class VoxelWorld : MonoBehaviour
     private CancellationTokenSource _regionCts = new();
     private bool _needsMoreRequests;
 
-    /// <summary>
-    /// Burst-native surface-height cache. Persists across batches within the same player
-    /// position, eliminating redundant FBM for boundary corners shared between neighbouring
-    /// chunks. Cleared whenever the player moves to a new chunk coord.
-    /// Key = ((long)worldX &lt;&lt; 32) | (uint)worldZ.
-    /// </summary>
-    private NativeParallelHashMap<long, int> _nativeSurfaceCache;
-
     // ── Unity ─────────────────────────────────────────────────────────────────
 
     private void Start()
     {
         _regionSemaphore = new SemaphoreSlim(maxRegionTasks, maxRegionTasks);
-
-        // Capacity: unique world (X,Z) voxel columns visited across the session.
-        // Only LOD0 mesh chunks write here (LowDetail=true skips the cache), but entries
-        // accumulate as the player moves — the map is never cleared at runtime because
-        // in-flight Burst jobs may still be reading it. 1M entries ≈ 20 MB covers a
-        // large exploration area before a cache miss forces recompute.
-        // NOTE: TryAddAtomic throws (not silently fails) when full in this Collections version,
-        // so capacity must be large enough to never be reached in practice.
-        _nativeSurfaceCache = new NativeParallelHashMap<long, int>(1 << 20, Allocator.Persistent);
 
         if (chunkMaterial == null)
             chunkMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
@@ -264,8 +255,9 @@ public class VoxelWorld : MonoBehaviour
         }
         foreach (var b in batchesToDispose)
         {
-            if (b.Data.IsCreated)   b.Data.Dispose();
-            if (b.Coords.IsCreated) b.Coords.Dispose();
+            if (b.Data.IsCreated)         b.Data.Dispose();
+            if (b.Coords.IsCreated)       b.Coords.Dispose();
+            if (b.SurfaceCache.IsCreated) b.SurfaceCache.Dispose();
         }
         _pipelines.Clear();
 
@@ -273,7 +265,6 @@ public class VoxelWorld : MonoBehaviour
         foreach (var kvp in _chunks) kvp.Value.Dispose();
         _chunks.Clear();
 
-        if (_nativeSurfaceCache.IsCreated) _nativeSurfaceCache.Dispose();
     }
 
     private void Update()
@@ -300,12 +291,7 @@ public class VoxelWorld : MonoBehaviour
             }
 
             if (posChanged)
-            {
                 TerrainGenerator.ClearSurfaceCache();
-                // NativeParallelHashMap is NOT cleared here: in-flight terrain jobs may still
-                // be reading from it. Terrain is deterministic so cached entries are always
-                // valid — old entries for distant columns are harmless wasted memory.
-            }
             Profiler.EndSample();
 
             Profiler.BeginSample("VoxelWorld.UpdateLoadedChunks(pos)");
@@ -619,8 +605,8 @@ public class VoxelWorld : MonoBehaviour
             Coords             = batch.Coords,
             LowDetail          = !buildMesh,
             AllBlocks          = batch.Data,
-            SurfaceCache       = _nativeSurfaceCache,
-            SurfaceCacheWriter = _nativeSurfaceCache.AsParallelWriter(),
+            SurfaceCache       = batch.SurfaceCache,
+            SurfaceCacheWriter = batch.SurfaceCache.AsParallelWriter(),
         };
         var terrainHandle = terrainJob.Schedule(count, 1);
         // batch.Coords is Persistent — disposed by BatchBuffer.Release() when all pipelines complete

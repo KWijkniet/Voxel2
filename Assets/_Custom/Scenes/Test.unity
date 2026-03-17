@@ -322,26 +322,26 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 70aa573b684399741ab0811235d6e0ba, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VoxelWorld
-  viewDistance: 16
-  verticalChunks: 10
+  viewDistance: 12
+  verticalChunks: 12
   player: {fileID: 1120276404}
   seaLevel: 20
   baseHeight: 2
-  plainsHeight: 4
-  mountainHeight: 150
+  plainsHeight: 8
+  mountainHeight: 200
   oceanDepth: 12
   noiseScale: 0.003
   octaves: 5
-  persistence: 0.35
+  persistence: 0.75
   lacunarity: 2
-  biomeScale: 0.0003
-  warpStrength: 25
+  biomeScale: 0.003
+  warpStrength: 40
   warpScale: 0.005
   dirtDepth: 4
   sandBeachWidth: 3
   snowAltitude: 100
   chunkMaterial: {fileID: 2100000, guid: 915577a1428a176489884433fbc104de, type: 2}
-  maxPipelinesInFlight: 32
+  maxPipelinesInFlight: 24
   maxApplyPerFrame: 12
   maxRequestsPerUpdate: 16
   maxRegionTasks: 8
