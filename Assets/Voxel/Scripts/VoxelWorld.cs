@@ -209,6 +209,8 @@ public class VoxelWorld : MonoBehaviour
 
     private readonly Dictionary<Vector3Int, RegionData>  _regions          = new();
     private readonly Dictionary<Vector3Int, Mesh>         _regionMeshes     = new();
+    private readonly Dictionary<Vector3Int, Mesh>         _staleRegionMeshes = new();
+    private readonly Dictionary<Vector3Int, Mesh>         _staleChunkMeshes  = new();
     private readonly HashSet<Vector3Int>                  _desiredRegions   = new();
     private readonly HashSet<Vector3Int>                  _regionInFlight   = new();
     private readonly ConcurrentQueue<RegionBuildResult>   _regionReadyQueue = new();
@@ -279,6 +281,10 @@ public class VoxelWorld : MonoBehaviour
         foreach (var kvp in _chunks) kvp.Value.Dispose();
         _chunks.Clear();
 
+        foreach (var kvp in _staleChunkMeshes)  if (kvp.Value != null) Destroy(kvp.Value);
+        foreach (var kvp in _staleRegionMeshes) if (kvp.Value != null) Destroy(kvp.Value);
+        _staleChunkMeshes.Clear();
+        _staleRegionMeshes.Clear();
     }
 
     private void Update()
@@ -294,6 +300,8 @@ public class VoxelWorld : MonoBehaviour
 
         if (posChanged || lodChanged)
         {
+            EvictStaleMeshes();
+
             Profiler.BeginSample("VoxelWorld.OnPositionChanged");
             _regionCts.Cancel();
             _regionCts.Dispose();
@@ -404,7 +412,18 @@ public class VoxelWorld : MonoBehaviour
                     int nearestZ    = Mathf.Clamp(_lastPlayerChunk.z, baseChunk.z, baseChunk.z + hSize - 1);
                     int chebDist    = Mathf.Max(Mathf.Abs(nearestX - _lastPlayerChunk.x),
                                                 Mathf.Abs(nearestZ - _lastPlayerChunk.z));
-                    if (chebDist >= outerRadius || chebDist < innerRadius) continue;
+
+                    // Use farthest corner for the inner-boundary test: a region is excluded only
+                    // when ALL of its chunks fall inside the LOD0 zone (farDist < innerRadius).
+                    // Using nearestDist caused a 1-chunk gap on negative axes because floor-div
+                    // shifts the nearest corner one step inside the LOD0 boundary there.
+                    int farX = Mathf.Max(Mathf.Abs(baseChunk.x - _lastPlayerChunk.x),
+                                         Mathf.Abs(baseChunk.x + hSize - 1 - _lastPlayerChunk.x));
+                    int farZ = Mathf.Max(Mathf.Abs(baseChunk.z - _lastPlayerChunk.z),
+                                         Mathf.Abs(baseChunk.z + hSize - 1 - _lastPlayerChunk.z));
+                    int farDist = Mathf.Max(farX, farZ);
+
+                    if (chebDist >= outerRadius || farDist < innerRadius) continue;
                     _desiredRegions.Add(regionCoord);
                 }
             }
@@ -749,7 +768,20 @@ public class VoxelWorld : MonoBehaviour
 
             // Apply mesh (or null sentinel for empty/data-only)
             if (p.BuildMesh && _desiredCoords.Contains(p.Coord) && !_chunkMeshes.ContainsKey(p.Coord))
-            { _chunkMeshes[p.Coord] = CreateMeshFromLists(ref p); _drawListDirty = true; }
+            {
+                _chunkMeshes[p.Coord] = CreateMeshFromLists(ref p);
+                // Remove same-coord stale chunk
+                if (_staleChunkMeshes.TryGetValue(p.Coord, out var stale))
+                { Destroy(stale); _staleChunkMeshes.Remove(p.Coord); }
+                // Remove stale regions of any LOD that contained this chunk
+                for (int lod = 1; lod <= lodLevels; lod++)
+                {
+                    var rc = ChunkToRegionCoord(p.Coord, lod);
+                    if (_staleRegionMeshes.TryGetValue(rc, out var sr))
+                    { Destroy(sr); _staleRegionMeshes.Remove(rc); }
+                }
+                _drawListDirty = true;
+            }
             else
                 DisposeMeshLists(ref p);
 
@@ -920,6 +952,20 @@ public class VoxelWorld : MonoBehaviour
                 && _desiredRegions.Contains(result.RegionCoord))
             {
                 _regionMeshes[result.RegionCoord] = MeshBuilder.CreateMesh(result.MeshData);
+                // Remove same-coord stale region
+                if (_staleRegionMeshes.TryGetValue(result.RegionCoord, out var stale))
+                { Destroy(stale); _staleRegionMeshes.Remove(result.RegionCoord); }
+                // Remove stale LOD0 chunks that fall within this region's footprint
+                var baseC = RegionBaseChunkCoord(result.RegionCoord);
+                int hs    = 1 << result.RegionCoord.y;
+                for (int cx = baseC.x; cx < baseC.x + hs; cx++)
+                for (int cz = baseC.z; cz < baseC.z + hs; cz++)
+                for (int cy = 0; cy < verticalChunks; cy++)
+                {
+                    var c = new Vector3Int(cx, cy, cz);
+                    if (_staleChunkMeshes.TryGetValue(c, out var sc))
+                    { Destroy(sc); _staleChunkMeshes.Remove(c); }
+                }
                 _drawListDirty = true;
                 anyAdded = true;
             }
@@ -936,12 +982,54 @@ public class VoxelWorld : MonoBehaviour
 
     private void UnloadChunkMesh(Vector3Int coord)
     {
-        if (_chunkMeshes.TryGetValue(coord, out var mesh)) { Destroy(mesh); _chunkMeshes.Remove(coord); _drawListDirty = true; }
+        if (_chunkMeshes.TryGetValue(coord, out var mesh))
+        {
+            _chunkMeshes.Remove(coord);
+            if (mesh != null) _staleChunkMeshes[coord] = mesh;
+            _drawListDirty = true;
+        }
     }
 
     private void UnloadRegionMesh(Vector3Int r)
     {
-        if (_regionMeshes.TryGetValue(r, out var mesh)) { Destroy(mesh); _regionMeshes.Remove(r); _drawListDirty = true; }
+        if (_regionMeshes.TryGetValue(r, out var mesh))
+        {
+            _regionMeshes.Remove(r);
+            if (mesh != null) _staleRegionMeshes[r] = mesh;
+            _drawListDirty = true;
+        }
+    }
+
+    private void EvictStaleMeshes()
+    {
+        int vd = AlignedViewDistance;
+
+        // Stale LOD0 chunks: evict once they're outside the LOD0 zone with a small buffer
+        // so they persist briefly while new chunks load in, but don't accumulate indefinitely.
+        _scratchUnloadC.Clear();
+        foreach (var c in _staleChunkMeshes.Keys)
+            if (Mathf.Abs(c.x - _lastPlayerChunk.x) > vd + 2 ||
+                Mathf.Abs(c.z - _lastPlayerChunk.z) > vd + 2)
+                _scratchUnloadC.Add(c);
+        foreach (var c in _scratchUnloadC)
+        { Destroy(_staleChunkMeshes[c]); _staleChunkMeshes.Remove(c); _drawListDirty = true; }
+
+        // Stale regions: evict once outside their LOD ring's outer radius with a buffer
+        _scratchUnloadR.Clear();
+        foreach (var r in _staleRegionMeshes.Keys)
+        {
+            int lod         = r.y;
+            int outerRadius = vd * (1 << lod) + (1 << lod);
+            var baseC  = RegionBaseChunkCoord(r);
+            int hs     = 1 << lod;
+            int nearX  = Mathf.Clamp(_lastPlayerChunk.x, baseC.x, baseC.x + hs - 1);
+            int nearZ  = Mathf.Clamp(_lastPlayerChunk.z, baseC.z, baseC.z + hs - 1);
+            int dist   = Mathf.Max(Mathf.Abs(nearX - _lastPlayerChunk.x),
+                                   Mathf.Abs(nearZ - _lastPlayerChunk.z));
+            if (dist > outerRadius) _scratchUnloadR.Add(r);
+        }
+        foreach (var r in _scratchUnloadR)
+        { Destroy(_staleRegionMeshes[r]); _staleRegionMeshes.Remove(r); _drawListDirty = true; }
     }
 
     private void DrawAllMeshes()
@@ -955,11 +1043,17 @@ public class VoxelWorld : MonoBehaviour
             _drawListDirty = false;
 
             _chunkDrawList.Clear();
+            foreach (var kvp in _staleChunkMeshes)
+                if (kvp.Value != null)
+                    _chunkDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(ChunkToWorldPos(kvp.Key))));
             foreach (var kvp in _chunkMeshes)
                 if (kvp.Value != null)
                     _chunkDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(ChunkToWorldPos(kvp.Key))));
 
             _regionDrawList.Clear();
+            foreach (var kvp in _staleRegionMeshes)
+                if (kvp.Value != null)
+                    _regionDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(RegionWorldPos(kvp.Key))));
             foreach (var kvp in _regionMeshes)
                 if (kvp.Value != null)
                     _regionDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(RegionWorldPos(kvp.Key))));
