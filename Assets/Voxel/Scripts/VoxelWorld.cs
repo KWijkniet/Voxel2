@@ -218,10 +218,14 @@ public class VoxelWorld : MonoBehaviour
     {
         _regionSemaphore = new SemaphoreSlim(maxRegionTasks, maxRegionTasks);
 
-        // Capacity: covers the full generation radius + LOD rings with room to spare.
-        // NativeParallelHashMap does not auto-resize; TryAdd silently fails when full
-        // (cache miss, recompute — correct but slightly slower). 64K entries = ~1 MB.
-        _nativeSurfaceCache = new NativeParallelHashMap<long, int>(1 << 16, Allocator.Persistent);
+        // Capacity: unique world (X,Z) voxel columns visited across the session.
+        // Only LOD0 mesh chunks write here (LowDetail=true skips the cache), but entries
+        // accumulate as the player moves — the map is never cleared at runtime because
+        // in-flight Burst jobs may still be reading it. 1M entries ≈ 20 MB covers a
+        // large exploration area before a cache miss forces recompute.
+        // NOTE: TryAddAtomic throws (not silently fails) when full in this Collections version,
+        // so capacity must be large enough to never be reached in practice.
+        _nativeSurfaceCache = new NativeParallelHashMap<long, int>(1 << 20, Allocator.Persistent);
 
         if (chunkMaterial == null)
             chunkMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
@@ -463,7 +467,10 @@ public class VoxelWorld : MonoBehaviour
             Profiler.BeginSample("LOD0.Gather");
             _scratchChunkSort.Clear();
             foreach (var coord in _pendingCoords)
-                _scratchChunkSort.Add((ChunkCenterWorld(coord).sqrMagnitude_To(playerPos), coord));
+                // Skip coords currently in-flight as data-only (they stay in _pendingCoords until
+                // their data pipeline completes, then will be re-gathered for a mesh pipeline).
+                if (!_inFlight.Contains(coord))
+                    _scratchChunkSort.Add((ChunkCenterWorld(coord).sqrMagnitude_To(playerPos), coord));
             Profiler.EndSample();
 
             if (_scratchChunkSort.Count > 1)
@@ -600,7 +607,9 @@ public class VoxelWorld : MonoBehaviour
         for (int i = 0; i < count; i++)
         {
             _inFlight.Add(coords[offset + i]);
-            _pendingCoords.Remove(coords[offset + i]);
+            // Only remove from pending for mesh pipelines. Data-only pipelines may target boundary
+            // chunks that also need a LOD0 mesh; removing them here would permanently skip them.
+            if (buildMesh) _pendingCoords.Remove(coords[offset + i]);
             batch.Coords[i] = new int3(coords[offset + i].x, coords[offset + i].y, coords[offset + i].z);
         }
 
