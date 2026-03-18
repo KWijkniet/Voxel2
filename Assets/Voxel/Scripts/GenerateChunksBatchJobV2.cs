@@ -17,6 +17,7 @@ public struct GenerateChunksBatchJobV2 : IJobParallelFor
     [ReadOnly] public NativeArray<float2>   CSpline;
     [ReadOnly] public NativeArray<float2>   ESpline;
     [ReadOnly] public NativeArray<BiomeDef> Biomes;
+    [ReadOnly] public NativeArray<TreeConfig> TreeConfigs;
 
     public bool LowDetail;
 
@@ -124,6 +125,73 @@ public struct GenerateChunksBatchJobV2 : IJobParallelFor
 
         dominants.Dispose();
         surfaces.Dispose();
+
+        // ── LOD tree stubs (LowDetail/region chunks only) ────────────────────
+        // StubHash MUST match ChunkDecorator.Hash — see ChunkDecorator.cs.
+        if (LowDetail && TreeConfigs.Length > 0)
+        {
+            var s = Settings;
+            for (int lz = 0; lz < Size; lz++)
+            for (int lx = 0; lx < Size; lx++)
+            {
+                int worldX = offsetX + lx;
+                int worldZ = offsetZ + lz;
+
+                float c  = SampleC(worldX, worldZ, s);
+                float t  = SampleT(worldX, worldZ, s);
+                float bh = SampleH(worldX, worldZ, s);
+
+                int   dom  = 0;
+                float bestW = 0f;
+                for (int b = 0; b < Biomes.Length; b++)
+                {
+                    float w = AxisWeight(Biomes[b].MinC, Biomes[b].MaxC, Biomes[b].BlendC, c)
+                            * AxisWeight(Biomes[b].MinT, Biomes[b].MaxT, Biomes[b].BlendT, t)
+                            * AxisWeight(Biomes[b].MinH, Biomes[b].MaxH, Biomes[b].BlendH, bh);
+                    if (w > bestW) { bestW = w; dom = b; }
+                }
+
+                if (dom >= TreeConfigs.Length) continue;
+                TreeConfig cfg = TreeConfigs[dom];
+                if (cfg.Species == TreeSpecies.None) continue;
+
+                uint period = (uint)math.max(1, (int)math.round(1f / math.max(cfg.Density, 1e-6f)));
+                uint h = StubHash(worldX, worldZ);
+                if (h % period != 0) continue;
+
+                int surface = GetSurface(worldX, worldZ, s);
+                if (surface <= s.SeaLevel) continue;
+                if (surface < cfg.MinAltitude || surface > cfg.MaxAltitude) continue;
+
+                byte leafBlock = cfg.Species == TreeSpecies.Pine ? BlockType.PineNeedles
+                               : cfg.Species == TreeSpecies.Dead  ? BlockType.Air
+                               : BlockType.Leaves;
+                int stubTrunkH = cfg.Species == TreeSpecies.Pine ? 5
+                               : cfg.Species == TreeSpecies.Dead  ? 2
+                               : cfg.Species == TreeSpecies.Birch ? 4 : 3;
+
+                for (int ty = 1; ty <= stubTrunkH; ty++)
+                {
+                    int wy = surface + ty;
+                    if (wy < offsetY || wy >= offsetY + Size) continue;
+                    AllBlocks[baseIdx + lx + (wy - offsetY) * Size + lz * Size * Size] = BlockType.Log;
+                }
+
+                if (leafBlock != BlockType.Air)
+                {
+                    int wy = surface + stubTrunkH + 1;
+                    if (wy >= offsetY && wy < offsetY + Size)
+                    {
+                        int ly2 = wy - offsetY;
+                        AllBlocks[baseIdx + lx       + ly2 * Size + lz       * Size * Size] = leafBlock;
+                        if (lx + 1 < Size) AllBlocks[baseIdx + (lx+1) + ly2 * Size + lz       * Size * Size] = leafBlock;
+                        if (lx - 1 >= 0)   AllBlocks[baseIdx + (lx-1) + ly2 * Size + lz       * Size * Size] = leafBlock;
+                        if (lz + 1 < Size) AllBlocks[baseIdx + lx       + ly2 * Size + (lz+1) * Size * Size] = leafBlock;
+                        if (lz - 1 >= 0)   AllBlocks[baseIdx + lx       + ly2 * Size + (lz-1) * Size * Size] = leafBlock;
+                    }
+                }
+            }
+        }
     }
 
     // ── Cache-aware surface height ────────────────────────────────────────────
@@ -291,6 +359,19 @@ public struct GenerateChunksBatchJobV2 : IJobParallelFor
         if (math.abs(range) < 1e-6f) return x >= edge1 ? 1f : 0f;
         float t = math.clamp((x - edge0) / range, 0f, 1f);
         return t * t * (3f - 2f * t);
+    }
+
+    /// <summary>
+    /// Deterministic column hash for LOD tree stub placement.
+    /// MUST be kept byte-for-byte identical to ChunkDecorator.Hash() in ChunkDecorator.cs (Task 3).
+    /// </summary>
+    private static uint StubHash(int worldX, int worldZ)
+    {
+        uint h = (uint)(worldX * 374761393 + worldZ * 668265263);
+        h ^= h >> 13;
+        h *= 1274126177u;
+        h ^= h >> 16;
+        return h;
     }
 
     // ── Block assignment ─────────────────────────────────────────────────────
