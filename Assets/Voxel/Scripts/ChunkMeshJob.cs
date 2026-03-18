@@ -152,7 +152,11 @@ public struct BuildChunkMeshJob : IJob
                 uList.Add(new float2(w, h));
                 uList.Add(new float2(0, h));
 
-                float texSlice = blockType - 1;
+                float texSlice;
+                if (blockType == BlockType.Log)
+                    texSlice = math.abs(normalVec.y) > 0.5f ? BlockType.LogTopTile : BlockType.LogSideTile;
+                else
+                    texSlice = BlockType.GetAtlasTile(blockType);
                 u2List.Add(new float2(texSlice, 0)); u2List.Add(new float2(texSlice, 0));
                 u2List.Add(new float2(texSlice, 0)); u2List.Add(new float2(texSlice, 0));
 
