@@ -130,6 +130,12 @@ public class VoxelWorld : MonoBehaviour
     [Tooltip("Biome definitions. Leave empty to use built-in defaults.")]
     public BiomeDef[] v2Biomes;
 
+    [Header("Terrain V2 — Trees")]
+    [Tooltip("Tree configs per biome. Leave empty to use built-in defaults.")]
+    public TreeConfig[] v2TreeConfigs;
+    [Tooltip("Max decoration passes (tree placement) per frame.")]
+    public int maxDecorationsPerFrame = 4;
+
     // ── Derived ───────────────────────────────────────────────────────────────
 
     public int AlignedViewDistance
@@ -153,6 +159,9 @@ public class VoxelWorld : MonoBehaviour
     private Matrix4x4    _cachedL2W       = Matrix4x4.zero;
     private readonly HashSet<Vector3Int>                  _desiredCoords  = new();
     private readonly HashSet<Vector3Int>                  _inFlight       = new();
+    // V2 decoration gate — chunks waiting for all 8 horizontal neighbours before tree placement
+    private readonly HashSet<Vector3Int> _awaitingDecoration       = new();
+    private readonly HashSet<Vector3Int> _needsMeshAfterDecoration = new();
     // Desired coords that are neither meshed nor in-flight. Kept in sync incrementally
     // so GatherAndSortLOD0 iterates only actionable work instead of all desiredCoords.
     private readonly HashSet<Vector3Int>                  _pendingCoords  = new();
@@ -162,6 +171,7 @@ public class VoxelWorld : MonoBehaviour
     private NativeArray<float2>   _v2CSpline;
     private NativeArray<float2>   _v2ESpline;
     private NativeArray<BiomeDef> _v2Biomes;
+    private NativeArray<TreeConfig>  _v2TreeConfigs;
 
     // ── LOD 0 pipeline (terrain IJob → mesh IJob, chained) ───────────────────
 
@@ -327,6 +337,10 @@ public class VoxelWorld : MonoBehaviour
             ? v2Biomes : BiomeDef.CreateDefaults();
         _v2Biomes  = new NativeArray<BiomeDef>(biomes.Length, Allocator.Persistent);
         _v2Biomes.CopyFrom(biomes);
+
+        if (v2TreeConfigs == null || v2TreeConfigs.Length == 0)
+            v2TreeConfigs = TreeConfig.CreateDefaults(v2SeaLevel, snowAltitude);
+        _v2TreeConfigs = new NativeArray<TreeConfig>(v2TreeConfigs, Allocator.Persistent);
     }
 
     private void OnDestroy()
@@ -383,6 +397,7 @@ public class VoxelWorld : MonoBehaviour
         if (_v2CSpline.IsCreated) _v2CSpline.Dispose();
         if (_v2ESpline.IsCreated) _v2ESpline.Dispose();
         if (_v2Biomes.IsCreated)  _v2Biomes.Dispose();
+        if (_v2TreeConfigs.IsCreated) _v2TreeConfigs.Dispose();
     }
 
     private void Update()
@@ -738,8 +753,14 @@ public class VoxelWorld : MonoBehaviour
                 CSpline            = _v2CSpline,
                 ESpline            = _v2ESpline,
                 Biomes             = _v2Biomes,
+                TreeConfigs        = _v2TreeConfigs,
             };
             terrainHandle = terrainJob.Schedule(count, 1);
+
+            // V2 LOD 0 chunks: track which need mesh after decoration
+            if (useV2Generator && buildMesh)
+                for (int i = 0; i < count; i++)
+                    _needsMeshAfterDecoration.Add(coords[offset + i]);
         }
         else
         {
@@ -761,7 +782,7 @@ public class VoxelWorld : MonoBehaviour
             var coord  = coords[offset + i];
             var voxels = batch.Data.GetSubArray(i * VoxelChunk.VoxelCount, VoxelChunk.VoxelCount);
 
-            if (!buildMesh)
+            if (!buildMesh || useV2Generator)
             {
                 _pipelines.Add(new ChunkPipeline
                 {
@@ -895,6 +916,17 @@ public class VoxelWorld : MonoBehaviour
             if (_chunks.TryGetValue(p.Coord, out var old)) old.Dispose();
             _chunks[p.Coord] = chunk;
 
+            // V2 terrain-only pipeline completes → queue for decoration gate
+            if (useV2Generator && !p.BuildMesh)
+            {
+                _awaitingDecoration.Add(p.Coord);
+                // Keep coord in _inFlight until SubmitMeshOnly completes (or data-only done in TryDecorateReady)
+                // DO NOT call _inFlight.Remove or TryFeedChunkIntoRegion here
+                _needsMoreRequests = true;
+                anyApplied = true;
+                continue;
+            }
+
             // Dispose neighbour snapshots
             if (p.NeighbourSnapshots != null)
                 foreach (var n in p.NeighbourSnapshots) n.Dispose();
@@ -931,6 +963,7 @@ public class VoxelWorld : MonoBehaviour
         foreach (int idx in _scratchRemove)
             _pipelines.RemoveAt(idx);
 
+        TryDecorateReady();
         return anyApplied;
     }
 
@@ -995,6 +1028,104 @@ public class VoxelWorld : MonoBehaviour
         if (p.TransUVs.IsCreated)   p.TransUVs.Dispose();
         if (p.TransUV2s.IsCreated)  p.TransUV2s.Dispose();
         if (p.TransTris.IsCreated)  p.TransTris.Dispose();
+    }
+
+    // ── V2 decoration pipeline ────────────────────────────────────────────────
+
+    private void TryDecorateReady()
+    {
+        if (!useV2Generator || _awaitingDecoration.Count == 0) return;
+
+        var ready = new List<Vector3Int>();
+        foreach (var coord in _awaitingDecoration)
+            if (ChunkDecorator.AllNeighboursReady(coord, _chunks))
+                ready.Add(coord);
+
+        int decorated = 0;
+        foreach (var coord in ready)
+        {
+            if (decorated >= maxDecorationsPerFrame) break;
+
+            ChunkDecorator.Decorate(coord, _chunks, v2TreeConfigs, _v2Biomes, GetTerrainSettingsV2());
+            _awaitingDecoration.Remove(coord);
+            decorated++;
+
+            // Feed into region AFTER decoration so region gets decorated voxels
+            TryFeedChunkIntoRegion(coord, _chunks[coord]);
+
+            bool wantsMesh = _needsMeshAfterDecoration.Remove(coord)
+                          && _desiredCoords.Contains(coord)
+                          && !_chunkMeshes.ContainsKey(coord);
+
+            if (wantsMesh)
+                SubmitMeshOnly(coord); // coord stays in _inFlight until mesh pipeline completes
+            else
+                _inFlight.Remove(coord); // data-only — fully done
+
+            _needsMoreRequests = true;
+        }
+    }
+
+    private void SubmitMeshOnly(Vector3Int coord)
+    {
+        if (!_chunks.TryGetValue(coord, out var chunk)) { _inFlight.Remove(coord); return; }
+
+        var snapshots = SnapshotNeighbours(coord, out int neighbourMask);
+        var voxelsCopy = new NativeArray<byte>(VoxelChunk.VoxelCount, Allocator.Persistent,
+                                               NativeArrayOptions.UninitializedMemory);
+        NativeArray<byte>.Copy(chunk.Blocks, voxelsCopy, VoxelChunk.VoxelCount);
+
+        var verts  = new NativeList<float3>(4096, Allocator.Persistent);
+        var norms  = new NativeList<float3>(4096, Allocator.Persistent);
+        var uvs    = new NativeList<float2>(4096, Allocator.Persistent);
+        var uv2s   = new NativeList<float2>(4096, Allocator.Persistent);
+        var tris   = new NativeList<int>   (6144, Allocator.Persistent);
+        var tVerts = new NativeList<float3>(512,  Allocator.Persistent);
+        var tNorms = new NativeList<float3>(512,  Allocator.Persistent);
+        var tUvs   = new NativeList<float2>(512,  Allocator.Persistent);
+        var tUv2s  = new NativeList<float2>(512,  Allocator.Persistent);
+        var tTris  = new NativeList<int>   (768,  Allocator.Persistent);
+
+        var meshJob = new BuildChunkMeshJob
+        {
+            Voxels         = voxelsCopy,
+            N_PX           = snapshots[0], N_NX = snapshots[1],
+            N_PY           = snapshots[2], N_NY = snapshots[3],
+            N_PZ           = snapshots[4], N_NZ = snapshots[5],
+            NeighbourMask  = neighbourMask,
+            Step           = 1,
+            Vertices       = verts,
+            Normals        = norms,
+            UVs            = uvs,
+            UV2s           = uv2s,
+            Triangles      = tris,
+            TransVertices  = tVerts,
+            TransNormals   = tNorms,
+            TransUVs       = tUvs,
+            TransUV2s      = tUv2s,
+            TransTriangles = tTris,
+        };
+
+        _pipelines.Add(new ChunkPipeline
+        {
+            Coord              = coord,
+            Handle             = meshJob.Schedule(),
+            Voxels             = voxelsCopy,
+            NeighbourSnapshots = snapshots,
+            BuildMesh          = true,
+            MeshVerts          = verts,
+            MeshNorms          = norms,
+            MeshUVs            = uvs,
+            MeshUV2s           = uv2s,
+            MeshTris           = tris,
+            TransVerts         = tVerts,
+            TransNorms         = tNorms,
+            TransUVs           = tUvs,
+            TransUV2s          = tUv2s,
+            TransTris          = tTris,
+        });
+        // Batch is null — ProcessCompletedPipelines disposes voxelsCopy via p.Voxels.Dispose()
+        // when the pipeline completes (existing code handles null Batch).
     }
 
     // ── Neighbour snapshots ───────────────────────────────────────────────────
