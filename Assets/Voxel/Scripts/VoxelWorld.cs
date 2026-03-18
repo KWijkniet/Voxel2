@@ -425,6 +425,14 @@ public class VoxelWorld : MonoBehaviour
                 var p = _pipelines[i]; p.Discarded = true; _pipelines[i] = p;
             }
 
+            // Clear V2 decoration gate — coords in _awaitingDecoration are in _inFlight
+            if (useV2Generator)
+            {
+                foreach (var c in _awaitingDecoration) _inFlight.Remove(c);
+                _awaitingDecoration.Clear();
+                _needsMeshAfterDecoration.Clear();
+            }
+
             if (posChanged)
                 TerrainGenerator.ClearSurfaceCache();
             Profiler.EndSample();
@@ -894,6 +902,8 @@ public class VoxelWorld : MonoBehaviour
                 if (p.Batch != null) p.Batch.Release(); else if (p.Voxels.IsCreated) p.Voxels.Dispose();
                 DisposeMeshLists(ref p);
                 _inFlight.Remove(p.Coord);
+                _awaitingDecoration.Remove(p.Coord);
+                _needsMeshAfterDecoration.Remove(p.Coord);
                 // Coord may still be desired under the new player position — re-queue it.
                 if (p.BuildMesh && _desiredCoords.Contains(p.Coord) && !_chunkMeshes.ContainsKey(p.Coord))
                     _pendingCoords.Add(p.Coord);
