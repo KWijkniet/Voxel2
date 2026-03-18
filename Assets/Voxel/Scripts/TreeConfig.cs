@@ -24,11 +24,11 @@ public struct TreeConfig
         new TreeConfig { Species = TreeSpecies.None },
         new TreeConfig { Species = TreeSpecies.None },
         new TreeConfig { Species = TreeSpecies.None },
-        new TreeConfig { Species = TreeSpecies.Oak,  Density = 0.01f, MinAltitude = seaLevel + 1, MaxAltitude = snowAltitude - 1 }, // Plains
-        new TreeConfig { Species = TreeSpecies.Oak,  Density = 0.06f, MinAltitude = seaLevel + 1, MaxAltitude = snowAltitude - 1 }, // Forest (Oak/Birch split in decorator)
-        new TreeConfig { Species = TreeSpecies.Dead, Density = 0.004f, MinAltitude = seaLevel + 1, MaxAltitude = 255 },             // Desert
-        new TreeConfig { Species = TreeSpecies.Pine, Density = 0.05f,  MinAltitude = seaLevel + 1, MaxAltitude = 255 },             // Taiga
-        new TreeConfig { Species = TreeSpecies.Dead, Density = 0.003f, MinAltitude = seaLevel + 1, MaxAltitude = 255 },             // Tundra
-        new TreeConfig { Species = TreeSpecies.Pine, Density = 0.02f,  MinAltitude = seaLevel + 1, MaxAltitude = snowAltitude - 1 },// Mountains (MaxAltitude gates above snow line)
+        new TreeConfig { Species = TreeSpecies.Oak,  Density = 0.01f, MinAltitude = seaLevel + 1, MaxAltitude = int.MaxValue },      // Plains  — biome system bounds placement, no altitude cap
+        new TreeConfig { Species = TreeSpecies.Oak,  Density = 0.06f, MinAltitude = seaLevel + 1, MaxAltitude = int.MaxValue },      // Forest (Oak/Birch split in decorator)
+        new TreeConfig { Species = TreeSpecies.Dead, Density = 0.004f, MinAltitude = seaLevel + 1, MaxAltitude = int.MaxValue },     // Desert
+        new TreeConfig { Species = TreeSpecies.Pine, Density = 0.05f,  MinAltitude = seaLevel + 1, MaxAltitude = int.MaxValue },     // Taiga
+        new TreeConfig { Species = TreeSpecies.Dead, Density = 0.003f, MinAltitude = seaLevel + 1, MaxAltitude = int.MaxValue },     // Tundra
+        new TreeConfig { Species = TreeSpecies.Pine, Density = 0.02f,  MinAltitude = seaLevel + 1, MaxAltitude = snowAltitude - 1 },// Mountains — capped at snow line
     };
 }
