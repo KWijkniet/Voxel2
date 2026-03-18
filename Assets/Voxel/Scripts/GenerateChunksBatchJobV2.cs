@@ -130,7 +130,6 @@ public struct GenerateChunksBatchJobV2 : IJobParallelFor
         // StubHash MUST match ChunkDecorator.Hash — see ChunkDecorator.cs.
         if (LowDetail && TreeConfigs.Length > 0)
         {
-            var s = Settings;
             for (int lz = 0; lz < Size; lz++)
             for (int lx = 0; lx < Size; lx++)
             {
