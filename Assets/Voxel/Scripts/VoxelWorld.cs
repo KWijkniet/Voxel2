@@ -303,6 +303,13 @@ public class VoxelWorld : MonoBehaviour
         v2ESplinePoints = SplineUtils.DefaultErosionSpline;
     }
 
+    private void OnValidate()
+    {
+        // Auto-populate V2 tree configs in the Inspector so the array isn't empty by default.
+        if (v2TreeConfigs == null || v2TreeConfigs.Length == 0)
+            v2TreeConfigs = TreeConfig.CreateDefaults(v2SeaLevel, snowAltitude);
+    }
+
     private void Start()
     {
         _regionSemaphore = new SemaphoreSlim(maxRegionTasks, maxRegionTasks);
