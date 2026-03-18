@@ -23,6 +23,9 @@ public class TerrainV2PreviewWindow : EditorWindow
         "Peaks & Valleys (PV)", "Temperature (T)", "Humidity (H)", "River Mask",
     };
 
+    private string GetMapLabel(int idx) =>
+        idx == 1 && _showTrees ? "Biome + Trees" : MapLabels[idx];
+
     // Biome colors indexed by default BiomeDef order
     private static readonly Color[] BiomeColors =
     {
@@ -56,6 +59,11 @@ public class TerrainV2PreviewWindow : EditorWindow
     // Generated textures (one per map)
     private Texture2D[] _textures;
     private float _heightMin, _heightMax;
+
+    // Tree preview
+    private TreeConfig[] _treeConfigs;   // null = use defaults; set by LoadFromVoxelWorld
+    private int          _snowAltitude = 75;
+    private bool         _showTrees    = true;
 
     // Editor UI scroll / fold state
     private Vector2 _sidebarScroll;
@@ -198,15 +206,24 @@ public class TerrainV2PreviewWindow : EditorWindow
         _settings.TerraceErosionMax  = EditorGUILayout.Slider("Terrace E Max", _settings.TerraceErosionMax, 0f, 1f);
 
         EditorGUILayout.Space(2);
+        EditorGUILayout.LabelField("Trees", EditorStyles.boldLabel);
+        _showTrees    = EditorGUILayout.Toggle("Show Trees on Biome Map", _showTrees);
+        _snowAltitude = EditorGUILayout.IntField("Snow Altitude (tree cap)", _snowAltitude);
+
+        EditorGUILayout.Space(2);
         if (GUILayout.Button("Reset to Defaults"))
         {
-            _settings = TerrainSettingsV2.Default;
-            _cSpline  = SplineUtils.DefaultContinentalnessSpline;
-            _eSpline  = SplineUtils.DefaultErosionSpline;
-            _biomes   = BiomeDef.CreateDefaults();
+            _settings     = TerrainSettingsV2.Default;
+            _cSpline      = SplineUtils.DefaultContinentalnessSpline;
+            _eSpline      = SplineUtils.DefaultErosionSpline;
+            _biomes       = BiomeDef.CreateDefaults();
+            _treeConfigs  = null;   // null → recompute from defaults on next Generate
+            _snowAltitude = 75;
         }
 
         EditorGUILayout.Space(4);
+        if (GUILayout.Button("Load from VoxelWorld in Scene"))
+            LoadFromVoxelWorld();
         if (GUILayout.Button("Apply to VoxelWorld in Scene"))
             ApplyToVoxelWorld();
 
@@ -347,7 +364,7 @@ public class TerrainV2PreviewWindow : EditorWindow
     private void DrawMapCell(int idx)
     {
         EditorGUILayout.BeginVertical(GUILayout.Width(MapDisplaySize + 4));
-        EditorGUILayout.LabelField(MapLabels[idx], EditorStyles.centeredGreyMiniLabel,
+        EditorGUILayout.LabelField(GetMapLabel(idx), EditorStyles.centeredGreyMiniLabel,
             GUILayout.Width(MapDisplaySize));
 
         var tex = _textures[idx];
@@ -468,6 +485,38 @@ public class TerrainV2PreviewWindow : EditorWindow
                 }
             }
 
+            // Tree overlay on biome map
+            if (_showTrees)
+            {
+                var treeConfigs = _treeConfigs ?? TreeConfig.CreateDefaults(_settings.SeaLevel, _snowAltitude);
+                for (int pz = 0; pz < res; pz++)
+                for (int px = 0; px < res; px++)
+                {
+                    int i2 = pz * res + px;
+                    var s2 = samples[i2];
+                    int dom = s2.DominantBiome;
+                    if (dom < 0 || dom >= treeConfigs.Length) continue;
+
+                    TreeConfig cfg = treeConfigs[dom];
+                    if (cfg.Species == TreeSpecies.None) continue;
+                    if (s2.HeightFinal <= _settings.SeaLevel) continue;
+                    if (s2.HeightFinal < cfg.MinAltitude || s2.HeightFinal > cfg.MaxAltitude) continue;
+
+                    float wx2 = _centerX + (px * invRes - 0.5f) * _worldRadius * 2f;
+                    float wz2 = _centerZ + (pz * invRes - 0.5f) * _worldRadius * 2f;
+                    int worldX = Mathf.RoundToInt(wx2);
+                    int worldZ = Mathf.RoundToInt(wz2);
+
+                    uint period = (uint)Mathf.RoundToInt(1f / Mathf.Max(cfg.Density, 1e-6f));
+                    if (ChunkDecorator.Hash(worldX, worldZ) % period != 0) continue;
+
+                    Color treeCol = cfg.Species == TreeSpecies.Pine ? new Color(0.05f, 0.30f, 0.05f)
+                                  : cfg.Species == TreeSpecies.Dead ? new Color(0.45f, 0.30f, 0.15f)
+                                  : new Color(0.15f, 0.60f, 0.10f);   // Oak / Birch
+                    pxBiome[i2] = ToColor32(treeCol);
+                }
+            }
+
             // Upload to textures
             _textures[0].SetPixels32(pxHeight); _textures[0].Apply();
             _textures[1].SetPixels32(pxBiome);  _textures[1].Apply();
@@ -538,7 +587,52 @@ public class TerrainV2PreviewWindow : EditorWindow
         arr = next;
     }
 
-    // ── Apply to VoxelWorld ───────────────────────────────────────────────────
+    // ── Load from / Apply to VoxelWorld ──────────────────────────────────────
+
+    private void LoadFromVoxelWorld()
+    {
+        var world = FindObjectOfType<VoxelWorld>();
+        if (world == null)
+        {
+            EditorUtility.DisplayDialog("Load from VoxelWorld",
+                "No VoxelWorld found in the current scene.", "OK");
+            return;
+        }
+
+        _settings.SeaLevel          = world.v2SeaLevel;
+        _settings.MaxAmplitude      = world.v2MaxAmplitude;
+        _settings.CScale            = world.v2CScale;
+        _settings.EScale            = world.v2EScale;
+        _settings.PVScale           = world.v2PVScale;
+        _settings.TScale            = world.v2TScale;
+        _settings.HScale            = world.v2HScale;
+        _settings.PVOctaves         = world.v2PVOctaves;
+        _settings.RiverThreshold    = world.v2RiverThreshold;
+        _settings.RiverMaskScale    = world.v2RiverMaskScale;
+        _settings.RiverCarveDepth   = world.v2RiverCarveDepth;
+        _settings.RiverErosionMin   = world.v2RiverErosionMin;
+        _settings.TerraceStep       = world.v2TerraceStep;
+        _settings.TerraceErosionMin = world.v2TerraceErosionMin;
+        _settings.TerraceErosionMax = world.v2TerraceErosionMax;
+
+        if (world.v2CSplinePoints != null && world.v2CSplinePoints.Length > 0)
+            _cSpline = (Vector2[])world.v2CSplinePoints.Clone();
+        if (world.v2ESplinePoints != null && world.v2ESplinePoints.Length > 0)
+            _eSpline = (Vector2[])world.v2ESplinePoints.Clone();
+        if (world.v2Biomes != null && world.v2Biomes.Length > 0)
+        {
+            _biomes     = (BiomeDef[])world.v2Biomes.Clone();
+            _biomeFolds = new bool[_biomes.Length];
+        }
+
+        _snowAltitude = world.snowAltitude;
+        _treeConfigs  = (world.v2TreeConfigs != null && world.v2TreeConfigs.Length > 0)
+            ? (TreeConfig[])world.v2TreeConfigs.Clone()
+            : null;   // null → recompute from defaults on next Generate
+
+        Debug.Log("[TerrainV2Preview] Settings loaded from VoxelWorld.");
+        Repaint();
+    }
 
     private void ApplyToVoxelWorld()
     {
@@ -571,6 +665,7 @@ public class TerrainV2PreviewWindow : EditorWindow
         world.v2CSplinePoints = (Vector2[])_cSpline.Clone();
         world.v2ESplinePoints = (Vector2[])_eSpline.Clone();
         world.v2Biomes        = (BiomeDef[])_biomes.Clone();
+        world.v2TreeConfigs   = (_treeConfigs ?? TreeConfig.CreateDefaults(_settings.SeaLevel, _snowAltitude)).Clone() as TreeConfig[];
 
         EditorUtility.SetDirty(world);
         Debug.Log("[TerrainV2Preview] Settings applied to VoxelWorld in scene.");
