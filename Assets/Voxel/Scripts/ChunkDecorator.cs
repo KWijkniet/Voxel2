@@ -6,7 +6,7 @@ using Unity.Collections;
 /// Main-thread tree placement pass. Called after all 8 horizontal neighbours are terrain-ready.
 /// Surface height is found by scanning the actual voxel data — no noise recompute needed.
 ///
-/// Hash function MUST stay identical to StubHash() in GenerateChunksBatchJobV2.cs.
+/// Hash function MUST stay identical to StubHash() in GenerateChunksBatchJobV2.cs (added in Task 6).
 /// </summary>
 public static class ChunkDecorator
 {
@@ -80,7 +80,9 @@ public static class ChunkDecorator
             if (species == TreeSpecies.Oak && (hash & 1u) == 1u)
                 species = TreeSpecies.Birch;
 
-            int variant = (int)((hash >> 8) % (uint)TreeShapes.HeightVariantCount(species));
+            int variantCount = TreeShapes.HeightVariantCount(species);
+            if (variantCount == 0) continue;
+            int variant = (int)((hash >> 8) % (uint)variantCount);
             var offsets  = TreeShapes.Get(species, variant);
 
             foreach (var off in offsets)
@@ -133,9 +135,9 @@ public static class ChunkDecorator
     }
 
     static Vector3Int WorldToChunkCoord(Vector3Int world) => new(
-        Mathf.FloorToInt(world.x / 16f),
-        Mathf.FloorToInt(world.y / 16f),
-        Mathf.FloorToInt(world.z / 16f));
+        world.x >= 0 ? world.x / 16 : (world.x - 15) / 16,
+        world.y >= 0 ? world.y / 16 : (world.y - 15) / 16,
+        world.z >= 0 ? world.z / 16 : (world.z - 15) / 16);
 
     // ── Biome determination (noise — main thread only) ────────────────────────
     // Note: uses Mathf.PerlinNoise; the Burst job uses noise.cnoise. Results may
@@ -157,15 +159,23 @@ public static class ChunkDecorator
                     * AxisWeight(biomes[b].MinH, biomes[b].MaxH, biomes[b].BlendH, h);
             if (w > bestW) { bestW = w; best = b; }
         }
+        if (bestW <= 0f) return -1;
         return best;
     }
 
     static float AxisWeight(float min, float max, float blend, float v)
     {
-        if (v < min - blend || v > max + blend) return 0f;
-        float lo = Mathf.Clamp01((v - (min - blend)) / Mathf.Max(blend, 1e-5f));
-        float hi = Mathf.Clamp01(((max + blend) - v)  / Mathf.Max(blend, 1e-5f));
-        return lo * hi;
+        float lower = blend > 0f ? Smoothstep(min - blend, min, v) : v >= min ? 1f : 0f;
+        float upper = blend > 0f ? 1f - Smoothstep(max, max + blend, v) : v <= max ? 1f : 0f;
+        return lower * upper;
+    }
+
+    static float Smoothstep(float edge0, float edge1, float x)
+    {
+        float range = edge1 - edge0;
+        if (Mathf.Abs(range) < 1e-6f) return x >= edge1 ? 1f : 0f;
+        float t = Mathf.Clamp01((x - edge0) / range);
+        return t * t * (3f - 2f * t);
     }
 
     static float FBM(float x, float z, int octaves, float persistence = 0.5f, float lacunarity = 2f)
