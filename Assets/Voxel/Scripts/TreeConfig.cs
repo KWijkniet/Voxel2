@@ -1,9 +1,11 @@
 using System;
+using System.Runtime.InteropServices;
 using UnityEngine;
 
 public enum TreeSpecies { None, Oak, Birch, Pine, Dead }
 
 [Serializable]
+[StructLayout(LayoutKind.Sequential)]
 public struct TreeConfig
 {
     public TreeSpecies Species;
