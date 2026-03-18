@@ -1,4 +1,5 @@
 using Unity.Collections;
+using UnityEngine;
 
 /// <summary>
 /// Flat voxel storage for a 16³ chunk.
@@ -15,6 +16,16 @@ public struct VoxelChunk
     public NativeArray<byte> Blocks;
 
     public byte GetBlock(int x, int y, int z) => Blocks[x + y * Size + z * Size * Size];
+
+    /// <summary>Writes a block at a world position. chunkOrigin = coord * 16.</summary>
+    public void SetBlock(Vector3Int worldPos, Vector3Int chunkOrigin, byte block)
+    {
+        int lx = worldPos.x - chunkOrigin.x;
+        int ly = worldPos.y - chunkOrigin.y;
+        int lz = worldPos.z - chunkOrigin.z;
+        if (lx < 0 || ly < 0 || lz < 0 || lx >= Size || ly >= Size || lz >= Size) return;
+        Blocks[lx + ly * Size + lz * Size * Size] = block;
+    }
 
     public bool IsSolid(int x, int y, int z)
     {
