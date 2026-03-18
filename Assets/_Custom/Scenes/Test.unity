@@ -334,7 +334,7 @@ MonoBehaviour:
   desertDuneHeight: 30
   oceanDepth: 10
   noiseScale: 0.003
-  octaves: 5
+  octaves: 6
   persistence: 0.75
   lacunarity: 2
   tempScale: 0.003
@@ -348,8 +348,8 @@ MonoBehaviour:
   snowAltitude: 100
   desertSandDepth: 6
   tundraFrozenDepth: 3
-  chunkMaterial: {fileID: 0}
-  transparentMaterial: {fileID: 0}
+  chunkMaterial: {fileID: 2100000, guid: 915577a1428a176489884433fbc104de, type: 2}
+  transparentMaterial: {fileID: 2100000, guid: fa3e29056337cac488678e43f3d29113, type: 2}
   maxPipelinesInFlight: 24
   maxApplyPerFrame: 12
   maxRequestsPerUpdate: 16

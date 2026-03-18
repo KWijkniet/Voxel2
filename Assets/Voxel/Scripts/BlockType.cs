@@ -20,9 +20,25 @@ public static class BlockType
     public const int AtlasTileCount = 14;
 
     // Explicit tile indices for Log (Log does NOT follow the blockType-1 formula).
-    public const int LogTopTile  = 10; // top/bottom faces
-    public const int LogSideTile = 11; // side faces
-    // Leaves=12, PineNeedles=13 both follow blockType-1 formula.
+    // Log occupies two atlas slots (tiles 10 and 11), so Leaves and PineNeedles also
+    // cannot use blockType-1. Use GetAtlasTile() instead of blockType-1 directly.
+    public const int LogTopTile      = 10; // top/bottom faces of Log
+    public const int LogSideTile     = 11; // side faces of Log
+    public const int LeavesTile      = 12;
+    public const int PineNeedlesTile = 13;
+
+    /// <summary>
+    /// Returns the default atlas tile index for a block type.
+    /// For Log, returns LogTopTile; the mesher overrides to LogSideTile for side faces.
+    /// Always prefer this over bare blockType-1 arithmetic.
+    /// </summary>
+    public static int GetAtlasTile(byte blockType) => blockType switch
+    {
+        Log         => LogTopTile,      // sides override to LogSideTile in mesher
+        Leaves      => LeavesTile,
+        PineNeedles => PineNeedlesTile,
+        _           => blockType - 1,
+    };
 
     /// <summary>Returns true for alpha-blended block types. Add new transparent types here.</summary>
     public static bool IsTransparent(byte b) => b == Water || b == Leaves || b == PineNeedles;
