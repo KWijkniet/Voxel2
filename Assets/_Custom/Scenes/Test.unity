@@ -534,6 +534,48 @@ MonoBehaviour:
     SubSurfaceDepth: 10
     DeepBlock: 1
     SnowAltitude: 75
+  v2TreeConfigs:
+  - Species: 0
+    Density: 0
+    MinAltitude: 0
+    MaxAltitude: 0
+  - Species: 0
+    Density: 0
+    MinAltitude: 0
+    MaxAltitude: 0
+  - Species: 0
+    Density: 0
+    MinAltitude: 0
+    MaxAltitude: 0
+  - Species: 0
+    Density: 0
+    MinAltitude: 0
+    MaxAltitude: 0
+  - Species: 1
+    Density: 0.01
+    MinAltitude: 21
+    MaxAltitude: 2147483647
+  - Species: 1
+    Density: 0.06
+    MinAltitude: 21
+    MaxAltitude: 2147483647
+  - Species: 4
+    Density: 0.004
+    MinAltitude: 21
+    MaxAltitude: 2147483647
+  - Species: 3
+    Density: 0.05
+    MinAltitude: 21
+    MaxAltitude: 2147483647
+  - Species: 4
+    Density: 0.003
+    MinAltitude: 21
+    MaxAltitude: 2147483647
+  - Species: 3
+    Density: 0.02
+    MinAltitude: 21
+    MaxAltitude: 99
+  maxDecorationsPerFrame: 4
 --- !u!4 &989120344
 Transform:
   m_ObjectHideFlags: 0

@@ -919,19 +919,29 @@ public class VoxelWorld : MonoBehaviour
 
             if (p.BuildMesh) budget--;
 
-            // Copy voxels to an owned NativeArray for VoxelChunk storage.
-            // p.Voxels may be a sub-array view into a BatchBuffer; copying ensures VoxelChunk
-            // lifetime is independent of the batch buffer.
-            var ownedVoxels = new NativeArray<byte>(VoxelChunk.VoxelCount, Allocator.Persistent,
-                                                     NativeArrayOptions.UninitializedMemory);
-            NativeArray<byte>.Copy(p.Voxels, ownedVoxels, VoxelChunk.VoxelCount);
-
-            // Release batch reference (or dispose solo-owned voxels)
-            if (p.Batch != null) p.Batch.Release(); else if (p.Voxels.IsCreated) p.Voxels.Dispose();
-
-            var chunk = new VoxelChunk { Blocks = ownedVoxels };
-            if (_chunks.TryGetValue(p.Coord, out var old)) old.Dispose();
-            _chunks[p.Coord] = chunk;
+            // For mesh-only pipelines (BuildMesh=true, Batch=null) p.Voxels is a temporary
+            // copy used by the mesh job. We must NOT write it back: neighbouring decorations
+            // may have placed cross-boundary tree blocks into _chunks[coord] after
+            // SubmitMeshOnly was called, and the snapshot would silently destroy them.
+            VoxelChunk chunk;
+            if (p.BuildMesh && p.Batch == null)
+            {
+                if (p.Voxels.IsCreated) p.Voxels.Dispose();
+                _chunks.TryGetValue(p.Coord, out chunk); // use live (decorated) data
+            }
+            else
+            {
+                // Copy voxels to an owned NativeArray for VoxelChunk storage.
+                // p.Voxels may be a sub-array view into a BatchBuffer; copying ensures VoxelChunk
+                // lifetime is independent of the batch buffer.
+                var ownedVoxels = new NativeArray<byte>(VoxelChunk.VoxelCount, Allocator.Persistent,
+                                                         NativeArrayOptions.UninitializedMemory);
+                NativeArray<byte>.Copy(p.Voxels, ownedVoxels, VoxelChunk.VoxelCount);
+                if (p.Batch != null) p.Batch.Release(); else if (p.Voxels.IsCreated) p.Voxels.Dispose();
+                chunk = new VoxelChunk { Blocks = ownedVoxels };
+                if (_chunks.TryGetValue(p.Coord, out var old)) old.Dispose();
+                _chunks[p.Coord] = chunk;
+            }
 
             // V2 terrain-only pipeline completes → queue for decoration gate
             if (useV2Generator && !p.BuildMesh)
@@ -1055,8 +1065,13 @@ public class VoxelWorld : MonoBehaviour
 
         var ready = new List<Vector3Int>();
         foreach (var coord in _awaitingDecoration)
-            if (ChunkDecorator.AllNeighboursReady(coord, _chunks))
-                ready.Add(coord);
+        {
+            if (!ChunkDecorator.AllNeighboursReady(coord, _chunks)) continue;
+            // Also require the chunk above so trees extending upward aren't cut off.
+            var aboveCoord = new Vector3Int(coord.x, coord.y + 1, coord.z);
+            if (coord.y + 1 < verticalChunks && !_chunks.ContainsKey(aboveCoord)) continue;
+            ready.Add(coord);
+        }
 
         int decorated = 0;
         foreach (var coord in ready)

@@ -36,10 +36,11 @@ public static class ChunkDecorator
         TerrainSettingsV2 settings,
         int verticalChunks)
     {
-        for (int dz = -1; dz <= 1; dz++)
-        for (int dx = -1; dx <= 1; dx++)
-            PlaceTreesForChunk(new Vector3Int(coord.x + dx, coord.y, coord.z + dz),
-                               chunks, treeConfigs, biomes, settings, verticalChunks);
+        // Only decorate the center chunk. Its 8 XZ neighbors are guaranteed loaded
+        // (AllNeighboursReady), so tree crowns extending up to ~9 blocks in XZ are safe.
+        // The chunk above is also guaranteed loaded (checked in TryDecorateReady),
+        // so trees extending upward don't get cut off.
+        PlaceTreesForChunk(coord, chunks, treeConfigs, biomes, settings, verticalChunks);
     }
 
     static void PlaceTreesForChunk(
@@ -104,6 +105,13 @@ public static class ChunkDecorator
     /// Returns world Y of the topmost solid (non-air, non-water) block where the block above is air.
     /// Returns -1 if no surface found in this chunk layer.
     /// </summary>
+    // Tree blocks are not valid terrain surfaces, and are passable for the "air above" check.
+    static bool IsTreeBlock(byte b) =>
+        b == BlockType.Log || b == BlockType.Leaves || b == BlockType.PineNeedles;
+
+    static bool IsAirLike(byte b) =>
+        b == BlockType.Air || b == BlockType.Water || IsTreeBlock(b);
+
     static int FindSurface(VoxelChunk chunk, int lx, int lz, int chunkBaseY,
                             Vector3Int sourceCoord, Dictionary<Vector3Int, VoxelChunk> chunks,
                             int verticalChunks)
@@ -111,13 +119,13 @@ public static class ChunkDecorator
         for (int ly = 15; ly >= 0; ly--)
         {
             byte b = chunk.GetBlock(lx, ly, lz);
-            if (b == BlockType.Air || b == BlockType.Water) continue;
+            if (IsAirLike(b)) continue; // skip air, water, and tree blocks
 
             bool topIsAir;
             if (ly < 15)
             {
                 byte above = chunk.GetBlock(lx, ly + 1, lz);
-                topIsAir = above == BlockType.Air || above == BlockType.Water;
+                topIsAir = IsAirLike(above); // tree blocks above terrain are passable
             }
             else
             {
@@ -126,7 +134,7 @@ public static class ChunkDecorator
                 if (chunks.TryGetValue(aboveCoord, out var aboveChunk))
                 {
                     byte above = aboveChunk.GetBlock(lx, 0, lz);
-                    topIsAir = above == BlockType.Air || above == BlockType.Water;
+                    topIsAir = IsAirLike(above);
                 }
                 else
                     // Chunk above not loaded. Only treat as sky if this is the topmost world layer;
