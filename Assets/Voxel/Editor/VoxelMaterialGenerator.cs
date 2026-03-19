@@ -12,7 +12,7 @@ using UnityEditor;
 /// Drop 16×16 (or any power-of-2) PNGs into Assets/Voxel/Textures/ named
 /// stone, dirt, grass, sand, water, snow, sandstone, frozendirt to use your own art.
 ///
-/// Atlas layout: [Stone | Dirt | Grass | Sand | Water | Snow | Sandstone | FrozenDirt | Ice | PackedIce]
+/// Atlas layout: [Stone | Dirt | Grass | Sand | Water | Snow | Sandstone | FrozenDirt | Ice | PackedIce | LogTop | LogSide | Leaves | PineNeedles]
 /// </summary>
 public static class VoxelMaterialGenerator
 {
@@ -36,8 +36,12 @@ public static class VoxelMaterialGenerator
         ("snow",      new Color32(220, 235, 255, 255)),
         ("sandstone", new Color32(210, 180,  90, 255)),
         ("frozendirt",new Color32(100,  95, 110, 255)),
-        ("ice",       new Color32(160, 215, 240, 255)),
-        ("packedice", new Color32(100, 170, 210, 255)),
+        ("ice",         new Color32(160, 215, 240, 255)),
+        ("packedice",   new Color32(100, 170, 210, 255)),
+        ("logtop",      new Color32(139, 115,  75, 255)),  // tile 10 — log top/bottom face
+        ("logside",     new Color32( 95,  65,  30, 255)),  // tile 11 — log bark
+        ("leaves",      new Color32( 50, 130,  25, 200)),  // tile 12 — oak/birch leaves (transparent)
+        ("pineneedles", new Color32( 25,  85,  20, 200)),  // tile 13 — pine needles (transparent)
     };
 
     /// <summary>Generates and returns (opaqueMaterial, transparentMaterial).</summary>
@@ -135,7 +139,9 @@ public static class VoxelMaterialGenerator
         var pixels = new Color32[TileSize * TileSize];
         var rng    = new System.Random(name.GetHashCode());
         // Transparent block types get partial alpha so the shader can blend them
-        byte baseAlpha = name == "water" ? (byte)160 : (byte)255;
+        byte baseAlpha = name == "water"                          ? (byte)160
+                       : name == "leaves" || name == "pineneedles" ? (byte)200
+                       : (byte)255;
 
         for (int y = 0; y < TileSize; y++)
         for (int x = 0; x < TileSize; x++)
@@ -185,6 +191,44 @@ public static class VoxelMaterialGenerator
             for (int x = 0; x < TileSize; x++)
                 if ((x + y * 2) % 6 == 0)
                     pixels[x + y * TileSize] = new Color32(160, 200, 220, 255);
+        }
+        else if (name == "logtop")
+        {
+            // Concentric rings suggesting end-grain
+            int half = TileSize / 2;
+            for (int y = 0; y < TileSize; y++)
+            for (int x = 0; x < TileSize; x++)
+            {
+                int dx = x - half, dy = y - half;
+                int ring = (int)Mathf.Sqrt(dx * dx + dy * dy);
+                if (ring % 3 == 0)
+                    pixels[x + y * TileSize] = Tint(baseCol, 0.72f);
+            }
+        }
+        else if (name == "logside")
+        {
+            // Vertical bark lines
+            for (int y = 0; y < TileSize; y++)
+            for (int x = 0; x < TileSize; x++)
+                if (x % 4 == 0 || x % 4 == 1)
+                    pixels[x + y * TileSize] = Tint(baseCol, 0.68f);
+        }
+        else if (name == "leaves")
+        {
+            // Scattered leaf gaps (holes of full transparency)
+            var rng2 = new System.Random(name.GetHashCode() + 1);
+            for (int y = 0; y < TileSize; y++)
+            for (int x = 0; x < TileSize; x++)
+                if (rng2.NextDouble() < 0.12)
+                    pixels[x + y * TileSize] = new Color32(0, 0, 0, 0);
+        }
+        else if (name == "pineneedles")
+        {
+            // Diagonal needle streaks
+            for (int y = 0; y < TileSize; y++)
+            for (int x = 0; x < TileSize; x++)
+                if ((x + y) % 5 == 0)
+                    pixels[x + y * TileSize] = Tint(baseCol, 0.65f);
         }
 
         tex.SetPixels32(pixels);
