@@ -33,12 +33,13 @@ public static class ChunkDecorator
         Dictionary<Vector3Int, VoxelChunk> chunks,
         TreeConfig[] treeConfigs,
         NativeArray<BiomeDef> biomes,
-        TerrainSettingsV2 settings)
+        TerrainSettingsV2 settings,
+        int verticalChunks)
     {
         for (int dz = -1; dz <= 1; dz++)
         for (int dx = -1; dx <= 1; dx++)
             PlaceTreesForChunk(new Vector3Int(coord.x + dx, coord.y, coord.z + dz),
-                               chunks, treeConfigs, biomes, settings);
+                               chunks, treeConfigs, biomes, settings, verticalChunks);
     }
 
     static void PlaceTreesForChunk(
@@ -46,7 +47,8 @@ public static class ChunkDecorator
         Dictionary<Vector3Int, VoxelChunk> chunks,
         TreeConfig[] treeConfigs,
         NativeArray<BiomeDef> biomes,
-        TerrainSettingsV2 settings)
+        TerrainSettingsV2 settings,
+        int verticalChunks)
     {
         if (!chunks.TryGetValue(sourceCoord, out var sourceChunk)) return;
         int baseX = sourceCoord.x * 16;
@@ -60,7 +62,7 @@ public static class ChunkDecorator
             int worldZ = baseZ + lz;
 
             // Find terrain surface by scanning the voxel column top-to-bottom
-            int surfaceY = FindSurface(sourceChunk, lx, lz, baseY, sourceCoord, chunks);
+            int surfaceY = FindSurface(sourceChunk, lx, lz, baseY, sourceCoord, chunks, verticalChunks);
             if (surfaceY < 0) continue; // no surface in this chunk layer
 
             uint hash    = Hash(worldX, worldZ);
@@ -103,7 +105,8 @@ public static class ChunkDecorator
     /// Returns -1 if no surface found in this chunk layer.
     /// </summary>
     static int FindSurface(VoxelChunk chunk, int lx, int lz, int chunkBaseY,
-                            Vector3Int sourceCoord, Dictionary<Vector3Int, VoxelChunk> chunks)
+                            Vector3Int sourceCoord, Dictionary<Vector3Int, VoxelChunk> chunks,
+                            int verticalChunks)
     {
         for (int ly = 15; ly >= 0; ly--)
         {
@@ -126,7 +129,9 @@ public static class ChunkDecorator
                     topIsAir = above == BlockType.Air || above == BlockType.Water;
                 }
                 else
-                    topIsAir = true; // chunk above not loaded → assume open air
+                    // Chunk above not loaded. Only treat as sky if this is the topmost world layer;
+                    // otherwise assume solid (prevents planting trees on underground "surfaces").
+                    topIsAir = sourceCoord.y + 1 >= verticalChunks;
             }
 
             if (topIsAir) return chunkBaseY + ly;

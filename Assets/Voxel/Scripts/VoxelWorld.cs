@@ -1063,7 +1063,7 @@ public class VoxelWorld : MonoBehaviour
         {
             if (decorated >= maxDecorationsPerFrame) break;
 
-            ChunkDecorator.Decorate(coord, _chunks, v2TreeConfigs, _v2Biomes, GetTerrainSettingsV2());
+            ChunkDecorator.Decorate(coord, _chunks, v2TreeConfigs, _v2Biomes, GetTerrainSettingsV2(), verticalChunks);
             _awaitingDecoration.Remove(coord);
             decorated++;
 
