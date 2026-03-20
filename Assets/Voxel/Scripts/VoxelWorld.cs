@@ -155,7 +155,7 @@ public class VoxelWorld : MonoBehaviour
     private readonly List<(Mesh mesh, Matrix4x4 trs)>    _transChunkDrawList   = new();
     private readonly List<(Mesh mesh, Matrix4x4 trs)>    _regionDrawList       = new();
     private readonly List<(Mesh mesh, Matrix4x4 trs)>    _transRegionDrawList  = new();
-    private bool         _drawListDirty   = true;
+    private readonly WorldFlags _flags = new WorldFlags { DrawListDirty = true };
     private Matrix4x4    _cachedL2W       = Matrix4x4.zero;
     private readonly HashSet<Vector3Int>                  _desiredCoords  = new();
     private readonly HashSet<Vector3Int>                  _inFlight       = new();
@@ -292,7 +292,6 @@ public class VoxelWorld : MonoBehaviour
 
     private SemaphoreSlim           _regionSemaphore;
     private CancellationTokenSource _regionCts = new();
-    private bool _needsMoreRequests;
 
     // ── Unity ─────────────────────────────────────────────────────────────────
 
@@ -457,7 +456,7 @@ public class VoxelWorld : MonoBehaviour
         bool regionsApplied = ApplyReadyRegions();
         Profiler.EndSample();
 
-        if ((pipelinesApplied || regionsApplied || anyDrained) && _needsMoreRequests)
+        if ((pipelinesApplied || regionsApplied || anyDrained) && _flags.NeedsMoreRequests)
         {
             Profiler.BeginSample("VoxelWorld.UpdateLoadedChunks(cascade)");
             UpdateLoadedChunks(false);
@@ -711,7 +710,7 @@ public class VoxelWorld : MonoBehaviour
             Profiler.EndSample();
         }
 
-        _needsMoreRequests = (lod0Submitted >= lod0Budget) || (regionSubmitted >= regionBudget);
+        _flags.NeedsMoreRequests = (lod0Submitted >= lod0Budget) || (regionSubmitted >= regionBudget);
     }
 
     // ── LOD 0 chunk pipeline ──────────────────────────────────────────────────
@@ -949,7 +948,7 @@ public class VoxelWorld : MonoBehaviour
                 _awaitingDecoration.Add(p.Coord);
                 // Keep coord in _inFlight until SubmitMeshOnly completes (or data-only done in TryDecorateReady)
                 // DO NOT call _inFlight.Remove or TryFeedChunkIntoRegion here
-                _needsMoreRequests = true;
+                _flags.NeedsMoreRequests = true;
                 anyApplied = true;
                 continue;
             }
@@ -973,7 +972,7 @@ public class VoxelWorld : MonoBehaviour
                     if (_staleRegionMeshes.TryGetValue(rc, out var sr))
                     { Destroy(sr); _staleRegionMeshes.Remove(rc); }
                 }
-                _drawListDirty = true;
+                _flags.DrawListDirty = true;
             }
             else
                 DisposeMeshLists(ref p);
@@ -981,7 +980,7 @@ public class VoxelWorld : MonoBehaviour
             _inFlight.Remove(p.Coord);
             TryFeedChunkIntoRegion(p.Coord, chunk);
 
-            _needsMoreRequests = true;
+            _flags.NeedsMoreRequests = true;
             anyApplied = true;
         }
 
@@ -1094,7 +1093,7 @@ public class VoxelWorld : MonoBehaviour
             else
                 _inFlight.Remove(coord); // data-only — fully done
 
-            _needsMoreRequests = true;
+            _flags.NeedsMoreRequests = true;
         }
     }
 
@@ -1267,7 +1266,7 @@ public class VoxelWorld : MonoBehaviour
                     if (_staleChunkMeshes.TryGetValue(c, out var sc))
                     { Destroy(sc); _staleChunkMeshes.Remove(c); }
                 }
-                _drawListDirty = true;
+                _flags.DrawListDirty = true;
                 anyAdded = true;
             }
             else
@@ -1288,10 +1287,10 @@ public class VoxelWorld : MonoBehaviour
         {
             _chunkMeshes.Remove(coord);
             if (mesh != null) _staleChunkMeshes[coord] = mesh;
-            _drawListDirty = true;
+            _flags.DrawListDirty = true;
         }
         if (_transChunkMeshes.TryGetValue(coord, out var tmesh))
-        { _transChunkMeshes.Remove(coord); if (tmesh != null) Destroy(tmesh); _drawListDirty = true; }
+        { _transChunkMeshes.Remove(coord); if (tmesh != null) Destroy(tmesh); _flags.DrawListDirty = true; }
     }
 
     private void UnloadRegionMesh(Vector3Int r)
@@ -1300,10 +1299,10 @@ public class VoxelWorld : MonoBehaviour
         {
             _regionMeshes.Remove(r);
             if (mesh != null) _staleRegionMeshes[r] = mesh;
-            _drawListDirty = true;
+            _flags.DrawListDirty = true;
         }
         if (_transRegionMeshes.TryGetValue(r, out var tmesh))
-        { _transRegionMeshes.Remove(r); if (tmesh != null) Destroy(tmesh); _drawListDirty = true; }
+        { _transRegionMeshes.Remove(r); if (tmesh != null) Destroy(tmesh); _flags.DrawListDirty = true; }
     }
 
     private void EvictStaleMeshes()
@@ -1318,7 +1317,7 @@ public class VoxelWorld : MonoBehaviour
                 Mathf.Abs(c.z - _lastPlayerChunk.z) > vd + 2)
                 _scratchUnloadC.Add(c);
         foreach (var c in _scratchUnloadC)
-        { Destroy(_staleChunkMeshes[c]); _staleChunkMeshes.Remove(c); _drawListDirty = true; }
+        { Destroy(_staleChunkMeshes[c]); _staleChunkMeshes.Remove(c); _flags.DrawListDirty = true; }
 
         // Stale regions: evict once outside their LOD ring's outer radius with a buffer
         _scratchUnloadR.Clear();
@@ -1335,7 +1334,7 @@ public class VoxelWorld : MonoBehaviour
             if (dist > outerRadius) _scratchUnloadR.Add(r);
         }
         foreach (var r in _scratchUnloadR)
-        { Destroy(_staleRegionMeshes[r]); _staleRegionMeshes.Remove(r); _drawListDirty = true; }
+        { Destroy(_staleRegionMeshes[r]); _staleRegionMeshes.Remove(r); _flags.DrawListDirty = true; }
     }
 
     private void DrawAllMeshes()
@@ -1343,10 +1342,10 @@ public class VoxelWorld : MonoBehaviour
         if (chunkMaterial == null) return;
         var localToWorld = transform.localToWorldMatrix;
 
-        if (_drawListDirty || localToWorld != _cachedL2W)
+        if (_flags.DrawListDirty || localToWorld != _cachedL2W)
         {
             _cachedL2W = localToWorld;
-            _drawListDirty = false;
+            _flags.DrawListDirty = false;
 
             _chunkDrawList.Clear();
             foreach (var kvp in _staleChunkMeshes)
