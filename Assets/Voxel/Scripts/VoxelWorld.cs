@@ -222,6 +222,11 @@ public class VoxelWorld : MonoBehaviour
         // Wire back-reference
         _renderer.RegionMgr = _regionMgr;
 
+        if (chunkMaterial == null)
+            chunkMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
+
+        AllocateV2NativeArrays();
+
         _pipeline = new ChunkPipelineProcessor(
             this,
             _v2CSpline, _v2ESpline, _v2Biomes, _v2TreeConfigs,
@@ -230,11 +235,6 @@ public class VoxelWorld : MonoBehaviour
             _inFlight, _desiredCoords, _pendingCoords,
             _flags,
             onChunkReady: _regionMgr.TryFeedChunkIntoRegion);
-
-        if (chunkMaterial == null)
-            chunkMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
-
-        AllocateV2NativeArrays();
 
         _lastLodLevels    = lodLevels;
         _lastViewDistance = viewDistance;
