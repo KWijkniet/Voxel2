@@ -26,7 +26,6 @@ internal sealed class VoxelMeshRenderer
 
     // Own scratch lists — separate from ChunkStreamer scratch lists
     private readonly List<Vector3Int> _scratchStaleChunks  = new();
-    private readonly List<Vector3Int> _scratchStaleRegions = new();
 
     public VoxelMeshRenderer(
         VoxelWorld world,
