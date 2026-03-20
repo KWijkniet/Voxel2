@@ -7,7 +7,6 @@ using UnityEngine;
 internal sealed class RegionManager
 {
     private readonly VoxelWorld _world;
-    private readonly Dictionary<Vector3Int, VoxelChunk>  _chunks;
     private readonly Dictionary<Vector3Int, RegionData>  _regions;
     private readonly Dictionary<Vector3Int, Mesh>        _regionMeshes;
     private readonly Dictionary<Vector3Int, Mesh>        _transRegionMeshes;
@@ -36,7 +35,6 @@ internal sealed class RegionManager
 
     public RegionManager(
         VoxelWorld world,
-        Dictionary<Vector3Int, VoxelChunk> chunks,
         Dictionary<Vector3Int, RegionData> regions,
         Dictionary<Vector3Int, Mesh> regionMeshes,
         Dictionary<Vector3Int, Mesh> transRegionMeshes,
@@ -46,7 +44,6 @@ internal sealed class RegionManager
         WorldFlags flags)
     {
         _world             = world;
-        _chunks            = chunks;
         _regions           = regions;
         _regionMeshes      = regionMeshes;
         _transRegionMeshes = transRegionMeshes;
@@ -171,22 +168,6 @@ internal sealed class RegionManager
 
     public RegionData GetRegion(Vector3Int regionCoord) =>
         _regions.TryGetValue(regionCoord, out var r) ? r : null;
-
-    public void UnloadRegionMesh(Vector3Int r)
-    {
-        if (_regionMeshes.TryGetValue(r, out var mesh))
-        {
-            _regionMeshes.Remove(r);
-            if (mesh != null) _staleRegionMeshes[r] = mesh;
-            _flags.DrawListDirty = true;
-        }
-        if (_transRegionMeshes.TryGetValue(r, out var tmesh))
-        {
-            _transRegionMeshes.Remove(r);
-            if (tmesh != null) Object.Destroy(tmesh);
-            _flags.DrawListDirty = true;
-        }
-    }
 
     /// <summary>Distance-based eviction of stale region meshes. Called by VoxelMeshRenderer.</summary>
     public void EvictStaleRegionMeshes()

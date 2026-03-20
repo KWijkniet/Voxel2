@@ -301,7 +301,7 @@ public class VoxelWorld : MonoBehaviour
             _flags);
 
         _regionMgr = new RegionManager(
-            this, _chunks, _regions,
+            this, _regions,
             _regionMeshes, _transRegionMeshes,
             _staleRegionMeshes, _staleChunkMeshes,
             _desiredRegions, _flags);
