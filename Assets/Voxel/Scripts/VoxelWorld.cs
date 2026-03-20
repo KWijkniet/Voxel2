@@ -1,13 +1,7 @@
-using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
 using UnityEngine;
 using Unity.Collections;
-using Unity.Jobs;
 using Unity.Mathematics;
-using UnityEngine.Rendering;
 using UnityEngine.Profiling;
 
 /// <summary>
@@ -300,23 +294,7 @@ public class VoxelWorld : MonoBehaviour
         Profiler.EndSample();
 
         if (posChanged || lodChanged)
-        {
-            _renderer.EvictStaleMeshes();
-
-            Profiler.BeginSample("VoxelWorld.OnPositionChanged");
-            _regionMgr.ResetCancellation();
-
-            _pipeline.MarkAllDiscarded();
-            _pipeline.ClearDecorationState();
-
-            if (posChanged)
-                TerrainGenerator.ClearSurfaceCache();
-            Profiler.EndSample();
-
-            Profiler.BeginSample("VoxelWorld.UpdateLoadedChunks(pos)");
-            _streamer.UpdateLoadedChunks(true);
-            Profiler.EndSample();
-        }
+            HandleWorldMoved(posChanged);
 
         Profiler.BeginSample("VoxelWorld.ProcessCompletedPipelines");
         bool pipelinesApplied = _pipeline.ProcessCompletedPipelines();
@@ -338,6 +316,17 @@ public class VoxelWorld : MonoBehaviour
         Profiler.EndSample();
     }
 
+    private void HandleWorldMoved(bool positionChanged)
+    {
+        // Order matches original VoxelWorld.Update: EvictStaleMeshes runs first, before CTS reset.
+        _renderer.EvictStaleMeshes();
+        _regionMgr.ResetCancellation();
+        _pipeline.MarkAllDiscarded();
+        _pipeline.ClearDecorationState();
+        if (positionChanged) TerrainGenerator.ClearSurfaceCache();
+        _streamer.UpdateLoadedChunks(true);
+    }
+
     private void OnGUI()
     {
         GUI.Label(new Rect(10, 10, 400, 200),
@@ -346,11 +335,9 @@ public class VoxelWorld : MonoBehaviour
             $"In-flight:       {_inFlight.Count}\n" +
             $"Pipelines:       {_pipeline.PipelineCount}\n" +
             $"Chunk meshes:    {_chunkMeshes.Count}\n" +
-            $"Player chunk:    {_lastPlayerChunkBacking}\n" +
+            $"Player chunk:    {LastPlayerChunk}\n" +
             $"ViewDist (aln):  {AlignedViewDistance}");
     }
-
-    // ── Change detection ──────────────────────────────────────────────────────
 
     private Vector3Int _lastPlayerChunkBacking = new Vector3Int(int.MaxValue, 0, 0);
     public  Vector3Int LastPlayerChunk
