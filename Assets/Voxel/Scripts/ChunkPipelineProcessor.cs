@@ -395,13 +395,13 @@ internal sealed class ChunkPipelineProcessor
                 _transChunkMeshes[p.Coord] = CreateMeshFromLists(ref p, transparent: true);
                 // Remove same-coord stale chunk
                 if (_staleChunkMeshes.TryGetValue(p.Coord, out var stale))
-                { Object.Destroy(stale); _staleChunkMeshes.Remove(p.Coord); }
+                { UnityEngine.Object.Destroy(stale); _staleChunkMeshes.Remove(p.Coord); }
                 // Remove stale regions of any LOD that contained this chunk
                 for (int lod = 1; lod <= _world.lodLevels; lod++)
                 {
                     var rc = VoxelCoords.ChunkToRegionCoord(p.Coord, lod);
                     if (_staleRegionMeshes.TryGetValue(rc, out var sr))
-                    { Object.Destroy(sr); _staleRegionMeshes.Remove(rc); }
+                    { UnityEngine.Object.Destroy(sr); _staleRegionMeshes.Remove(rc); }
                 }
                 _flags.DrawListDirty = true;
             }
