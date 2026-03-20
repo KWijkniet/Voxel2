@@ -151,12 +151,8 @@ public class VoxelWorld : MonoBehaviour
     private readonly Dictionary<Vector3Int, VoxelChunk> _chunks      = new();
     private readonly Dictionary<Vector3Int, Mesh>        _chunkMeshes      = new();
     private readonly Dictionary<Vector3Int, Mesh>        _transChunkMeshes = new();
-    private readonly List<(Mesh mesh, Matrix4x4 trs)>    _chunkDrawList        = new();
-    private readonly List<(Mesh mesh, Matrix4x4 trs)>    _transChunkDrawList   = new();
-    private readonly List<(Mesh mesh, Matrix4x4 trs)>    _regionDrawList       = new();
-    private readonly List<(Mesh mesh, Matrix4x4 trs)>    _transRegionDrawList  = new();
     private readonly WorldFlags _flags = new WorldFlags { DrawListDirty = true };
-    private Matrix4x4    _cachedL2W       = Matrix4x4.zero;
+    private VoxelMeshRenderer _renderer;
     private readonly HashSet<Vector3Int>                  _desiredCoords  = new();
     private readonly HashSet<Vector3Int>                  _inFlight       = new();
     // V2 decoration gate — chunks waiting for all 8 horizontal neighbours before tree placement
@@ -313,6 +309,14 @@ public class VoxelWorld : MonoBehaviour
     {
         _regionSemaphore = new SemaphoreSlim(maxRegionTasks, maxRegionTasks);
 
+        _renderer = new VoxelMeshRenderer(
+            this,
+            _chunkMeshes, _transChunkMeshes,
+            _regionMeshes, _transRegionMeshes,
+            _staleChunkMeshes, _staleRegionMeshes,
+            _flags);
+        // _renderer.RegionMgr wired in Task 4
+
         if (chunkMaterial == null)
             chunkMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
 
@@ -320,7 +324,7 @@ public class VoxelWorld : MonoBehaviour
 
         _lastLodLevels    = lodLevels;
         _lastViewDistance = viewDistance;
-        _lastPlayerChunk  = VoxelCoords.WorldToChunkCoord(player != null ? player.position : Vector3.zero);
+        _lastPlayerChunkBacking  = VoxelCoords.WorldToChunkCoord(player != null ? player.position : Vector3.zero);
         UpdateLoadedChunks(true);
     }
 
@@ -419,7 +423,7 @@ public class VoxelWorld : MonoBehaviour
 
         if (posChanged || lodChanged)
         {
-            EvictStaleMeshes();
+            _renderer.EvictStaleMeshes();
 
             Profiler.BeginSample("VoxelWorld.OnPositionChanged");
             _regionCts.Cancel();
@@ -464,7 +468,7 @@ public class VoxelWorld : MonoBehaviour
         }
 
         Profiler.BeginSample("VoxelWorld.DrawAllMeshes");
-        DrawAllMeshes();
+        _renderer.DrawAllMeshes();
         Profiler.EndSample();
     }
 
@@ -476,13 +480,18 @@ public class VoxelWorld : MonoBehaviour
             $"In-flight:       {_inFlight.Count}\n" +
             $"Pipelines:       {_pipelines.Count}\n" +
             $"Chunk meshes:    {_chunkMeshes.Count}\n" +
-            $"Player chunk:    {_lastPlayerChunk}\n" +
+            $"Player chunk:    {_lastPlayerChunkBacking}\n" +
             $"ViewDist (aln):  {AlignedViewDistance}");
     }
 
     // ── Change detection ──────────────────────────────────────────────────────
 
-    private Vector3Int _lastPlayerChunk  = new Vector3Int(int.MaxValue, 0, 0);
+    private Vector3Int _lastPlayerChunkBacking = new Vector3Int(int.MaxValue, 0, 0);
+    public  Vector3Int LastPlayerChunk
+    {
+        get => _lastPlayerChunkBacking;
+        set => _lastPlayerChunkBacking = value;
+    }
     private int        _lastLodLevels    = -1;
     private int        _lastViewDistance = -1;
 
@@ -491,15 +500,15 @@ public class VoxelWorld : MonoBehaviour
         if (lodLevels == _lastLodLevels && viewDistance == _lastViewDistance) return false;
         _lastLodLevels    = lodLevels;
         _lastViewDistance = viewDistance;
-        _lastPlayerChunk  = new Vector3Int(int.MaxValue, 0, 0);
+        _lastPlayerChunkBacking  = new Vector3Int(int.MaxValue, 0, 0);
         return true;
     }
 
     private bool CheckPositionChanged()
     {
         var cur = VoxelCoords.WorldToChunkCoord(player != null ? player.position : Vector3.zero);
-        if (cur == _lastPlayerChunk) return false;
-        _lastPlayerChunk = cur;
+        if (cur == _lastPlayerChunkBacking) return false;
+        _lastPlayerChunkBacking = cur;
         return true;
     }
 
@@ -518,7 +527,7 @@ public class VoxelWorld : MonoBehaviour
             for (int x = -(vd - 1); x <= vd - 1; x++)
             for (int z = -(vd - 1); z <= vd - 1; z++)
             for (int y = 0; y < verticalChunks; y++)
-                _desiredCoords.Add(new Vector3Int(_lastPlayerChunk.x + x, y, _lastPlayerChunk.z + z));
+                _desiredCoords.Add(new Vector3Int(_lastPlayerChunkBacking.x + x, y, _lastPlayerChunkBacking.z + z));
 
             // LOD 1+ rings
             for (int lod = 1; lod <= lodLevels; lod++)
@@ -526,8 +535,8 @@ public class VoxelWorld : MonoBehaviour
                 int hSize       = 1 << lod;
                 int innerRadius = vd * (1 << (lod - 1));
                 int outerRadius = vd * (1 << lod);
-                int playerRX    = Mathf.FloorToInt(_lastPlayerChunk.x / (float)hSize);
-                int playerRZ    = Mathf.FloorToInt(_lastPlayerChunk.z / (float)hSize);
+                int playerRX    = Mathf.FloorToInt(_lastPlayerChunkBacking.x / (float)hSize);
+                int playerRZ    = Mathf.FloorToInt(_lastPlayerChunkBacking.z / (float)hSize);
                 int maxRegionR  = outerRadius / hSize + 1;
 
                 for (int rx = -maxRegionR; rx <= maxRegionR; rx++)
@@ -535,19 +544,19 @@ public class VoxelWorld : MonoBehaviour
                 {
                     var regionCoord = new Vector3Int(playerRX + rx, lod, playerRZ + rz);
                     var baseChunk   = VoxelCoords.RegionBaseChunkCoord(regionCoord);
-                    int nearestX    = Mathf.Clamp(_lastPlayerChunk.x, baseChunk.x, baseChunk.x + hSize - 1);
-                    int nearestZ    = Mathf.Clamp(_lastPlayerChunk.z, baseChunk.z, baseChunk.z + hSize - 1);
-                    int chebDist    = Mathf.Max(Mathf.Abs(nearestX - _lastPlayerChunk.x),
-                                                Mathf.Abs(nearestZ - _lastPlayerChunk.z));
+                    int nearestX    = Mathf.Clamp(_lastPlayerChunkBacking.x, baseChunk.x, baseChunk.x + hSize - 1);
+                    int nearestZ    = Mathf.Clamp(_lastPlayerChunkBacking.z, baseChunk.z, baseChunk.z + hSize - 1);
+                    int chebDist    = Mathf.Max(Mathf.Abs(nearestX - _lastPlayerChunkBacking.x),
+                                                Mathf.Abs(nearestZ - _lastPlayerChunkBacking.z));
 
                     // Use farthest corner for the inner-boundary test: a region is excluded only
                     // when ALL of its chunks fall inside the LOD0 zone (farDist < innerRadius).
                     // Using nearestDist caused a 1-chunk gap on negative axes because floor-div
                     // shifts the nearest corner one step inside the LOD0 boundary there.
-                    int farX = Mathf.Max(Mathf.Abs(baseChunk.x - _lastPlayerChunk.x),
-                                         Mathf.Abs(baseChunk.x + hSize - 1 - _lastPlayerChunk.x));
-                    int farZ = Mathf.Max(Mathf.Abs(baseChunk.z - _lastPlayerChunk.z),
-                                         Mathf.Abs(baseChunk.z + hSize - 1 - _lastPlayerChunk.z));
+                    int farX = Mathf.Max(Mathf.Abs(baseChunk.x - _lastPlayerChunkBacking.x),
+                                         Mathf.Abs(baseChunk.x + hSize - 1 - _lastPlayerChunkBacking.x));
+                    int farZ = Mathf.Max(Mathf.Abs(baseChunk.z - _lastPlayerChunkBacking.z),
+                                         Mathf.Abs(baseChunk.z + hSize - 1 - _lastPlayerChunkBacking.z));
                     int farDist = Mathf.Max(farX, farZ);
 
                     if (chebDist >= outerRadius || farDist < innerRadius) continue;
@@ -561,13 +570,13 @@ public class VoxelWorld : MonoBehaviour
             _scratchUnloadC.Clear();
             foreach (var c in _chunkMeshes.Keys)
                 if (!_desiredCoords.Contains(c)) _scratchUnloadC.Add(c);
-            foreach (var c in _scratchUnloadC) UnloadChunkMesh(c);
+            foreach (var c in _scratchUnloadC) _renderer.UnloadChunkMesh(c);
 
             // Unload out-of-range region meshes
             _scratchUnloadR.Clear();
             foreach (var r in _regionMeshes.Keys)
                 if (!_desiredRegions.Contains(r)) _scratchUnloadR.Add(r);
-            foreach (var r in _scratchUnloadR) UnloadRegionMesh(r);
+            foreach (var r in _scratchUnloadR) _renderer.UnloadRegionMesh(r);
             Profiler.EndSample();
 
             Profiler.BeginSample("ULC.EvictData");
@@ -575,8 +584,8 @@ public class VoxelWorld : MonoBehaviour
             int evictR = MaxRadius + 2;
             _scratchEvictC.Clear();
             foreach (var c in _chunks.Keys)
-                if (Mathf.Abs(c.x - _lastPlayerChunk.x) > evictR ||
-                    Mathf.Abs(c.z - _lastPlayerChunk.z) > evictR) _scratchEvictC.Add(c);
+                if (Mathf.Abs(c.x - _lastPlayerChunkBacking.x) > evictR ||
+                    Mathf.Abs(c.z - _lastPlayerChunkBacking.z) > evictR) _scratchEvictC.Add(c);
             foreach (var c in _scratchEvictC)
             { _chunks[c].Dispose(); _chunks.Remove(c); }
 
@@ -880,7 +889,7 @@ public class VoxelWorld : MonoBehaviour
         if (_scratchCompleted.Count == 0) return false;
 
         // Sort: non-discarded closest-first; discarded last (always drained without budget cost)
-        var pc = _lastPlayerChunk;
+        var pc = _lastPlayerChunkBacking;
         _scratchCompleted.Sort((a, b) =>
         {
             var pa = _pipelines[a]; var pb = _pipelines[b];
@@ -1188,8 +1197,8 @@ public class VoxelWorld : MonoBehaviour
 
     private void TryFeedChunkIntoRegion(Vector3Int coord, VoxelChunk chunk)
     {
-        int dist     = Mathf.Max(Mathf.Abs(coord.x - _lastPlayerChunk.x),
-                                  Mathf.Abs(coord.z - _lastPlayerChunk.z));
+        int dist     = Mathf.Max(Mathf.Abs(coord.x - _lastPlayerChunkBacking.x),
+                                  Mathf.Abs(coord.z - _lastPlayerChunkBacking.z));
         int lod      = 0;
         int boundary = AlignedViewDistance;
         while (lod < lodLevels && dist >= boundary) { lod++; boundary *= 2; }
@@ -1277,114 +1286,6 @@ public class VoxelWorld : MonoBehaviour
             applied++;
         }
         return anyAdded;
-    }
-
-    // ── Mesh lifecycle ────────────────────────────────────────────────────────
-
-    private void UnloadChunkMesh(Vector3Int coord)
-    {
-        if (_chunkMeshes.TryGetValue(coord, out var mesh))
-        {
-            _chunkMeshes.Remove(coord);
-            if (mesh != null) _staleChunkMeshes[coord] = mesh;
-            _flags.DrawListDirty = true;
-        }
-        if (_transChunkMeshes.TryGetValue(coord, out var tmesh))
-        { _transChunkMeshes.Remove(coord); if (tmesh != null) Destroy(tmesh); _flags.DrawListDirty = true; }
-    }
-
-    private void UnloadRegionMesh(Vector3Int r)
-    {
-        if (_regionMeshes.TryGetValue(r, out var mesh))
-        {
-            _regionMeshes.Remove(r);
-            if (mesh != null) _staleRegionMeshes[r] = mesh;
-            _flags.DrawListDirty = true;
-        }
-        if (_transRegionMeshes.TryGetValue(r, out var tmesh))
-        { _transRegionMeshes.Remove(r); if (tmesh != null) Destroy(tmesh); _flags.DrawListDirty = true; }
-    }
-
-    private void EvictStaleMeshes()
-    {
-        int vd = AlignedViewDistance;
-
-        // Stale LOD0 chunks: evict once they're outside the LOD0 zone with a small buffer
-        // so they persist briefly while new chunks load in, but don't accumulate indefinitely.
-        _scratchUnloadC.Clear();
-        foreach (var c in _staleChunkMeshes.Keys)
-            if (Mathf.Abs(c.x - _lastPlayerChunk.x) > vd + 2 ||
-                Mathf.Abs(c.z - _lastPlayerChunk.z) > vd + 2)
-                _scratchUnloadC.Add(c);
-        foreach (var c in _scratchUnloadC)
-        { Destroy(_staleChunkMeshes[c]); _staleChunkMeshes.Remove(c); _flags.DrawListDirty = true; }
-
-        // Stale regions: evict once outside their LOD ring's outer radius with a buffer
-        _scratchUnloadR.Clear();
-        foreach (var r in _staleRegionMeshes.Keys)
-        {
-            int lod         = r.y;
-            int outerRadius = vd * (1 << lod) + (1 << lod);
-            var baseC  = VoxelCoords.RegionBaseChunkCoord(r);
-            int hs     = 1 << lod;
-            int nearX  = Mathf.Clamp(_lastPlayerChunk.x, baseC.x, baseC.x + hs - 1);
-            int nearZ  = Mathf.Clamp(_lastPlayerChunk.z, baseC.z, baseC.z + hs - 1);
-            int dist   = Mathf.Max(Mathf.Abs(nearX - _lastPlayerChunk.x),
-                                   Mathf.Abs(nearZ - _lastPlayerChunk.z));
-            if (dist > outerRadius) _scratchUnloadR.Add(r);
-        }
-        foreach (var r in _scratchUnloadR)
-        { Destroy(_staleRegionMeshes[r]); _staleRegionMeshes.Remove(r); _flags.DrawListDirty = true; }
-    }
-
-    private void DrawAllMeshes()
-    {
-        if (chunkMaterial == null) return;
-        var localToWorld = transform.localToWorldMatrix;
-
-        if (_flags.DrawListDirty || localToWorld != _cachedL2W)
-        {
-            _cachedL2W = localToWorld;
-            _flags.DrawListDirty = false;
-
-            _chunkDrawList.Clear();
-            foreach (var kvp in _staleChunkMeshes)
-                if (kvp.Value != null)
-                    _chunkDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(VoxelCoords.ChunkToWorldPos(kvp.Key))));
-            foreach (var kvp in _chunkMeshes)
-                if (kvp.Value != null)
-                    _chunkDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(VoxelCoords.ChunkToWorldPos(kvp.Key))));
-
-            _regionDrawList.Clear();
-            foreach (var kvp in _staleRegionMeshes)
-                if (kvp.Value != null)
-                    _regionDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(VoxelCoords.RegionWorldPos(kvp.Key))));
-            foreach (var kvp in _regionMeshes)
-                if (kvp.Value != null)
-                    _regionDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(VoxelCoords.RegionWorldPos(kvp.Key))));
-
-            _transChunkDrawList.Clear();
-            foreach (var kvp in _transChunkMeshes)
-                if (kvp.Value != null)
-                    _transChunkDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(VoxelCoords.ChunkToWorldPos(kvp.Key))));
-
-            _transRegionDrawList.Clear();
-            foreach (var kvp in _transRegionMeshes)
-                if (kvp.Value != null)
-                    _transRegionDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(VoxelCoords.RegionWorldPos(kvp.Key))));
-        }
-
-        var transMat = transparentMaterial != null ? transparentMaterial : chunkMaterial;
-        int layer = gameObject.layer;
-        foreach (var (mesh, trs) in _chunkDrawList)
-            Graphics.DrawMesh(mesh, trs, chunkMaterial, layer);
-        foreach (var (mesh, trs) in _regionDrawList)
-            Graphics.DrawMesh(mesh, trs, chunkMaterial, layer);
-        // Transparent pass — drawn after opaque so blending works correctly
-        foreach (var (mesh, trs) in _transChunkDrawList)
-            Graphics.DrawMesh(mesh, trs, transMat, layer);
-        foreach (var (mesh, trs) in _transRegionDrawList)
-            Graphics.DrawMesh(mesh, trs, transMat, layer);
     }
 
     // ── Terrain settings ──────────────────────────────────────────────────────
