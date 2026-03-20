@@ -321,7 +321,7 @@ public class VoxelWorld : MonoBehaviour
 
         _lastLodLevels    = lodLevels;
         _lastViewDistance = viewDistance;
-        _lastPlayerChunk  = WorldToChunkCoord(player != null ? player.position : Vector3.zero);
+        _lastPlayerChunk  = VoxelCoords.WorldToChunkCoord(player != null ? player.position : Vector3.zero);
         UpdateLoadedChunks(true);
     }
 
@@ -498,7 +498,7 @@ public class VoxelWorld : MonoBehaviour
 
     private bool CheckPositionChanged()
     {
-        var cur = WorldToChunkCoord(player != null ? player.position : Vector3.zero);
+        var cur = VoxelCoords.WorldToChunkCoord(player != null ? player.position : Vector3.zero);
         if (cur == _lastPlayerChunk) return false;
         _lastPlayerChunk = cur;
         return true;
@@ -535,7 +535,7 @@ public class VoxelWorld : MonoBehaviour
                 for (int rz = -maxRegionR; rz <= maxRegionR; rz++)
                 {
                     var regionCoord = new Vector3Int(playerRX + rx, lod, playerRZ + rz);
-                    var baseChunk   = RegionBaseChunkCoord(regionCoord);
+                    var baseChunk   = VoxelCoords.RegionBaseChunkCoord(regionCoord);
                     int nearestX    = Mathf.Clamp(_lastPlayerChunk.x, baseChunk.x, baseChunk.x + hSize - 1);
                     int nearestZ    = Mathf.Clamp(_lastPlayerChunk.z, baseChunk.z, baseChunk.z + hSize - 1);
                     int chebDist    = Mathf.Max(Mathf.Abs(nearestX - _lastPlayerChunk.x),
@@ -617,7 +617,7 @@ public class VoxelWorld : MonoBehaviour
                 // Skip coords currently in-flight as data-only (they stay in _pendingCoords until
                 // their data pipeline completes, then will be re-gathered for a mesh pipeline).
                 if (!_inFlight.Contains(coord))
-                    _scratchChunkSort.Add((ChunkCenterWorld(coord).sqrMagnitude_To(playerPos), coord));
+                    _scratchChunkSort.Add((VoxelCoords.ChunkCenterWorld(coord).sqrMagnitude_To(playerPos), coord));
             Profiler.EndSample();
 
             if (_scratchChunkSort.Count > 1)
@@ -651,7 +651,7 @@ public class VoxelWorld : MonoBehaviour
         foreach (var r in _desiredRegions)
         {
             if (_regionInFlight.Contains(r) || _regionMeshes.ContainsKey(r)) continue;
-            _scratchRegions.Add((RegionCenterWorld(r).sqrMagnitude_To(playerPos), r));
+            _scratchRegions.Add((VoxelCoords.RegionCenterWorld(r).sqrMagnitude_To(playerPos), r));
         }
         _scratchRegions.Sort((a, b) => a.dist.CompareTo(b.dist));
         Profiler.EndSample();
@@ -678,7 +678,7 @@ public class VoxelWorld : MonoBehaviour
                 continue;
             }
 
-            var baseChunk = RegionBaseChunkCoord(regionCoord);
+            var baseChunk = VoxelCoords.RegionBaseChunkCoord(regionCoord);
             for (int lcx = 0; lcx < hSize; lcx++)
             for (int lcy = 0; lcy < verticalChunks; lcy++)
             for (int lcz = 0; lcz < hSize; lcz++)
@@ -969,7 +969,7 @@ public class VoxelWorld : MonoBehaviour
                 // Remove stale regions of any LOD that contained this chunk
                 for (int lod = 1; lod <= lodLevels; lod++)
                 {
-                    var rc = ChunkToRegionCoord(p.Coord, lod);
+                    var rc = VoxelCoords.ChunkToRegionCoord(p.Coord, lod);
                     if (_staleRegionMeshes.TryGetValue(rc, out var sr))
                     { Destroy(sr); _staleRegionMeshes.Remove(rc); }
                 }
@@ -1196,10 +1196,10 @@ public class VoxelWorld : MonoBehaviour
         while (lod < lodLevels && dist >= boundary) { lod++; boundary *= 2; }
         if (lod == 0) return;
 
-        var regionCoord = ChunkToRegionCoord(coord, lod);
+        var regionCoord = VoxelCoords.ChunkToRegionCoord(coord, lod);
         if (!_regions.TryGetValue(regionCoord, out var region)) return;
 
-        var local = coord - RegionBaseChunkCoord(regionCoord);
+        var local = coord - VoxelCoords.RegionBaseChunkCoord(regionCoord);
         if (region.HasChunk(local.x, local.y, local.z)) return;
 
         var bytes = new byte[VoxelChunk.VoxelCount];
@@ -1257,7 +1257,7 @@ public class VoxelWorld : MonoBehaviour
                 if (_staleRegionMeshes.TryGetValue(result.RegionCoord, out var stale))
                 { Destroy(stale); _staleRegionMeshes.Remove(result.RegionCoord); }
                 // Remove stale LOD0 chunks that fall within this region's footprint
-                var baseC = RegionBaseChunkCoord(result.RegionCoord);
+                var baseC = VoxelCoords.RegionBaseChunkCoord(result.RegionCoord);
                 int hs    = 1 << result.RegionCoord.y;
                 for (int cx = baseC.x; cx < baseC.x + hs; cx++)
                 for (int cz = baseC.z; cz < baseC.z + hs; cz++)
@@ -1326,7 +1326,7 @@ public class VoxelWorld : MonoBehaviour
         {
             int lod         = r.y;
             int outerRadius = vd * (1 << lod) + (1 << lod);
-            var baseC  = RegionBaseChunkCoord(r);
+            var baseC  = VoxelCoords.RegionBaseChunkCoord(r);
             int hs     = 1 << lod;
             int nearX  = Mathf.Clamp(_lastPlayerChunk.x, baseC.x, baseC.x + hs - 1);
             int nearZ  = Mathf.Clamp(_lastPlayerChunk.z, baseC.z, baseC.z + hs - 1);
@@ -1351,28 +1351,28 @@ public class VoxelWorld : MonoBehaviour
             _chunkDrawList.Clear();
             foreach (var kvp in _staleChunkMeshes)
                 if (kvp.Value != null)
-                    _chunkDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(ChunkToWorldPos(kvp.Key))));
+                    _chunkDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(VoxelCoords.ChunkToWorldPos(kvp.Key))));
             foreach (var kvp in _chunkMeshes)
                 if (kvp.Value != null)
-                    _chunkDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(ChunkToWorldPos(kvp.Key))));
+                    _chunkDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(VoxelCoords.ChunkToWorldPos(kvp.Key))));
 
             _regionDrawList.Clear();
             foreach (var kvp in _staleRegionMeshes)
                 if (kvp.Value != null)
-                    _regionDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(RegionWorldPos(kvp.Key))));
+                    _regionDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(VoxelCoords.RegionWorldPos(kvp.Key))));
             foreach (var kvp in _regionMeshes)
                 if (kvp.Value != null)
-                    _regionDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(RegionWorldPos(kvp.Key))));
+                    _regionDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(VoxelCoords.RegionWorldPos(kvp.Key))));
 
             _transChunkDrawList.Clear();
             foreach (var kvp in _transChunkMeshes)
                 if (kvp.Value != null)
-                    _transChunkDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(ChunkToWorldPos(kvp.Key))));
+                    _transChunkDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(VoxelCoords.ChunkToWorldPos(kvp.Key))));
 
             _transRegionDrawList.Clear();
             foreach (var kvp in _transRegionMeshes)
                 if (kvp.Value != null)
-                    _transRegionDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(RegionWorldPos(kvp.Key))));
+                    _transRegionDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(VoxelCoords.RegionWorldPos(kvp.Key))));
         }
 
         var transMat = transparentMaterial != null ? transparentMaterial : chunkMaterial;
@@ -1444,61 +1444,4 @@ public class VoxelWorld : MonoBehaviour
     public RegionData GetRegion(Vector3Int regionCoord) =>
         _regions.TryGetValue(regionCoord, out var r) ? r : null;
 
-    // ── Coordinate helpers ────────────────────────────────────────────────────
-
-    private static Vector3Int WorldToChunkCoord(Vector3 p)
-    {
-        int s = VoxelChunk.Size;
-        return new Vector3Int(Mathf.FloorToInt(p.x / s), 0, Mathf.FloorToInt(p.z / s));
-    }
-
-    private static Vector3Int ChunkToRegionCoord(Vector3Int chunk, int lodLevel)
-    {
-        int size = 1 << lodLevel;
-        return new Vector3Int(
-            Mathf.FloorToInt(chunk.x / (float)size),
-            lodLevel,
-            Mathf.FloorToInt(chunk.z / (float)size));
-    }
-
-    private static Vector3Int RegionBaseChunkCoord(Vector3Int regionCoord)
-    {
-        int size = 1 << regionCoord.y;
-        return new Vector3Int(regionCoord.x * size, 0, regionCoord.z * size);
-    }
-
-    private static Vector3 ChunkToWorldPos(Vector3Int c)
-    {
-        float s = VoxelChunk.Size;
-        return new Vector3(c.x * s, c.y * s, c.z * s);
-    }
-
-    private static Vector3 RegionWorldPos(Vector3Int regionCoord)
-    {
-        float s = VoxelChunk.Size * (1 << regionCoord.y);
-        return new Vector3(regionCoord.x * s, 0, regionCoord.z * s);
-    }
-
-    private static Vector3 ChunkCenterWorld(Vector3Int c)
-    {
-        float s = VoxelChunk.Size;
-        return new Vector3(c.x * s + s * .5f, c.y * s + s * .5f, c.z * s + s * .5f);
-    }
-
-    private static Vector3 RegionCenterWorld(Vector3Int regionCoord)
-    {
-        float s = VoxelChunk.Size * (1 << regionCoord.y);
-        return new Vector3(regionCoord.x * s + s * .5f, 0, regionCoord.z * s + s * .5f);
-    }
-}
-
-// ── Extension helper ──────────────────────────────────────────────────────────
-
-internal static class Vector3Ext
-{
-    internal static float sqrMagnitude_To(this Vector3 a, Vector3 b)
-    {
-        float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-        return dx*dx + dy*dy + dz*dz;
-    }
 }
