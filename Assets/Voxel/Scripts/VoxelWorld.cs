@@ -232,6 +232,7 @@ public class VoxelWorld : MonoBehaviour
             _renderer.UnloadChunkMesh, _renderer.UnloadRegionMesh);
         _streamer.Pipeline = _pipeline;
         _streamer.Regions  = _regionMgr;
+        _streamer.CheckLodSettingsChanged(); // prime _lastLodLevels/_lastViewDistance
 
         _lastPlayerChunkBacking  = VoxelCoords.WorldToChunkCoord(player != null ? player.position : Vector3.zero);
         _streamer.UpdateLoadedChunks(true);
