@@ -273,21 +273,7 @@ public class VoxelWorld : MonoBehaviour
     private readonly Dictionary<Vector3Int, Mesh>         _staleRegionMeshes = new();
     private readonly Dictionary<Vector3Int, Mesh>         _staleChunkMeshes  = new();
     private readonly HashSet<Vector3Int>                  _desiredRegions   = new();
-    private readonly HashSet<Vector3Int>                  _regionInFlight   = new();
-    private readonly ConcurrentQueue<RegionBuildResult>   _regionReadyQueue = new();
-    private readonly ConcurrentQueue<Vector3Int>          _cancelledRegions = new();
-
-    private readonly struct RegionBuildResult
-    {
-        public readonly Vector3Int       RegionCoord;
-        public readonly WritableMeshData MeshData;
-        public readonly WritableMeshData TransMeshData;
-        public RegionBuildResult(Vector3Int r, WritableMeshData m, WritableMeshData t)
-        { RegionCoord = r; MeshData = m; TransMeshData = t; }
-    }
-
-    private SemaphoreSlim           _regionSemaphore;
-    private CancellationTokenSource _regionCts = new();
+    private RegionManager _regionMgr;
 
     // ── Unity ─────────────────────────────────────────────────────────────────
 
@@ -307,15 +293,21 @@ public class VoxelWorld : MonoBehaviour
 
     private void Start()
     {
-        _regionSemaphore = new SemaphoreSlim(maxRegionTasks, maxRegionTasks);
-
         _renderer = new VoxelMeshRenderer(
             this,
             _chunkMeshes, _transChunkMeshes,
             _regionMeshes, _transRegionMeshes,
             _staleChunkMeshes, _staleRegionMeshes,
             _flags);
-        // _renderer.RegionMgr wired in Task 4
+
+        _regionMgr = new RegionManager(
+            this, _chunks, _regions,
+            _regionMeshes, _transRegionMeshes,
+            _staleRegionMeshes, _staleChunkMeshes,
+            _desiredRegions, _flags);
+
+        // Wire back-reference
+        _renderer.RegionMgr = _regionMgr;
 
         if (chunkMaterial == null)
             chunkMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
@@ -356,8 +348,7 @@ public class VoxelWorld : MonoBehaviour
     private void OnDestroy()
     {
         // Cancel region tasks
-        _regionCts.Cancel();
-        _regionCts.Dispose();
+        _regionMgr.CancelCts();
 
         // Complete and dispose all in-flight Burst pipelines
         var batchesToDispose = new System.Collections.Generic.HashSet<BatchBuffer>();
@@ -408,6 +399,8 @@ public class VoxelWorld : MonoBehaviour
         if (_v2ESpline.IsCreated) _v2ESpline.Dispose();
         if (_v2Biomes.IsCreated)  _v2Biomes.Dispose();
         if (_v2TreeConfigs.IsCreated) _v2TreeConfigs.Dispose();
+
+        _regionMgr.CompleteAndDispose();
     }
 
     private void Update()
@@ -416,9 +409,7 @@ public class VoxelWorld : MonoBehaviour
         bool lodChanged = CheckLodSettingsChanged();
         bool posChanged = CheckPositionChanged();
 
-        bool anyDrained = false;
-        while (_cancelledRegions.TryDequeue(out var r))
-        { _regionInFlight.Remove(r); anyDrained = true; }
+        bool anyDrained = _regionMgr.DrainCancelledRegions();
         Profiler.EndSample();
 
         if (posChanged || lodChanged)
@@ -426,9 +417,7 @@ public class VoxelWorld : MonoBehaviour
             _renderer.EvictStaleMeshes();
 
             Profiler.BeginSample("VoxelWorld.OnPositionChanged");
-            _regionCts.Cancel();
-            _regionCts.Dispose();
-            _regionCts = new CancellationTokenSource();
+            _regionMgr.ResetCancellation();
 
             for (int i = 0; i < _pipelines.Count; i++)
             {
@@ -457,7 +446,7 @@ public class VoxelWorld : MonoBehaviour
         Profiler.EndSample();
 
         Profiler.BeginSample("VoxelWorld.ApplyReadyRegions");
-        bool regionsApplied = ApplyReadyRegions();
+        bool regionsApplied = _regionMgr.ApplyReadyRegions();
         Profiler.EndSample();
 
         if ((pipelinesApplied || regionsApplied || anyDrained) && _flags.NeedsMoreRequests)
@@ -658,7 +647,7 @@ public class VoxelWorld : MonoBehaviour
         _scratchRegions.Clear();
         foreach (var r in _desiredRegions)
         {
-            if (_regionInFlight.Contains(r) || _regionMeshes.ContainsKey(r)) continue;
+            if (_regionMgr.IsRegionInFlight(r) || _regionMeshes.ContainsKey(r)) continue;
             _scratchRegions.Add((VoxelCoords.RegionCenterWorld(r).sqrMagnitude_To(playerPos), r));
         }
         _scratchRegions.Sort((a, b) => a.dist.CompareTo(b.dist));
@@ -682,7 +671,7 @@ public class VoxelWorld : MonoBehaviour
             }
             else if (regionSubmitted >= regionBudget)
             {
-                if (region.IsComplete) RequestRegionMesh(regionCoord, region);
+                if (region.IsComplete) _regionMgr.RequestRegionMesh(regionCoord, region);
                 continue;
             }
 
@@ -707,7 +696,7 @@ public class VoxelWorld : MonoBehaviour
                 }
             }
 
-            if (region.IsComplete) RequestRegionMesh(regionCoord, region);
+            if (region.IsComplete) _regionMgr.RequestRegionMesh(regionCoord, region);
         }
         Profiler.EndSample();
 
@@ -987,7 +976,7 @@ public class VoxelWorld : MonoBehaviour
                 DisposeMeshLists(ref p);
 
             _inFlight.Remove(p.Coord);
-            TryFeedChunkIntoRegion(p.Coord, chunk);
+            _regionMgr.TryFeedChunkIntoRegion(p.Coord, chunk);
 
             _flags.NeedsMoreRequests = true;
             anyApplied = true;
@@ -1091,7 +1080,7 @@ public class VoxelWorld : MonoBehaviour
             decorated++;
 
             // Feed into region AFTER decoration so region gets decorated voxels
-            TryFeedChunkIntoRegion(coord, _chunks[coord]);
+            _regionMgr.TryFeedChunkIntoRegion(coord, _chunks[coord]);
 
             bool wantsMesh = _needsMeshAfterDecoration.Remove(coord)
                           && _desiredCoords.Contains(coord)
@@ -1193,101 +1182,6 @@ public class VoxelWorld : MonoBehaviour
         return snapshots;
     }
 
-    // ── Region feeding ────────────────────────────────────────────────────────
-
-    private void TryFeedChunkIntoRegion(Vector3Int coord, VoxelChunk chunk)
-    {
-        int dist     = Mathf.Max(Mathf.Abs(coord.x - _lastPlayerChunkBacking.x),
-                                  Mathf.Abs(coord.z - _lastPlayerChunkBacking.z));
-        int lod      = 0;
-        int boundary = AlignedViewDistance;
-        while (lod < lodLevels && dist >= boundary) { lod++; boundary *= 2; }
-        if (lod == 0) return;
-
-        var regionCoord = VoxelCoords.ChunkToRegionCoord(coord, lod);
-        if (!_regions.TryGetValue(regionCoord, out var region)) return;
-
-        var local = coord - VoxelCoords.RegionBaseChunkCoord(regionCoord);
-        if (region.HasChunk(local.x, local.y, local.z)) return;
-
-        var bytes = new byte[VoxelChunk.VoxelCount];
-        chunk.CopyTo(bytes);
-        region.SetChunk(local.x, local.y, local.z, bytes);
-
-        if (region.IsComplete && _desiredRegions.Contains(regionCoord)
-            && !_regionInFlight.Contains(regionCoord)
-            && !_regionMeshes.ContainsKey(regionCoord))
-            RequestRegionMesh(regionCoord, region);
-    }
-
-    // ── LOD 1+ region tasks (Task.Run) ────────────────────────────────────────
-
-    private void RequestRegionMesh(Vector3Int regionCoord, RegionData region)
-    {
-        _regionInFlight.Add(regionCoord);
-        int step = 1 << regionCoord.y;
-
-        var neighbours = new RegionData[6];
-        var dirs = MeshBuilder.RegionNeighbourDirs;
-        neighbours[0] = GetRegion(regionCoord + dirs[0]);
-        neighbours[1] = GetRegion(regionCoord + dirs[1]);
-        neighbours[4] = GetRegion(regionCoord + dirs[4]);
-        neighbours[5] = GetRegion(regionCoord + dirs[5]);
-
-        var token = _regionCts.Token;
-        Task.Run(async () =>
-        {
-            try { await _regionSemaphore.WaitAsync(token); }
-            catch (OperationCanceledException) { _cancelledRegions.Enqueue(regionCoord); return; }
-            try
-            {
-                var (mesh, transMesh) = MeshBuilder.BuildRegionMeshData(region, neighbours, step);
-                _regionReadyQueue.Enqueue(new RegionBuildResult(regionCoord, mesh, transMesh));
-            }
-            finally { _regionSemaphore.Release(); }
-        });
-    }
-
-    private bool ApplyReadyRegions()
-    {
-        int  applied  = 0;
-        bool anyAdded = false;
-        while (applied < maxApplyPerFrame && _regionReadyQueue.TryDequeue(out var result))
-        {
-            _regionInFlight.Remove(result.RegionCoord);
-
-            if (!_regionMeshes.ContainsKey(result.RegionCoord)
-                && _desiredRegions.Contains(result.RegionCoord))
-            {
-                _regionMeshes[result.RegionCoord]      = MeshBuilder.CreateMesh(result.MeshData);
-                _transRegionMeshes[result.RegionCoord] = MeshBuilder.CreateMesh(result.TransMeshData);
-                // Remove same-coord stale region
-                if (_staleRegionMeshes.TryGetValue(result.RegionCoord, out var stale))
-                { Destroy(stale); _staleRegionMeshes.Remove(result.RegionCoord); }
-                // Remove stale LOD0 chunks that fall within this region's footprint
-                var baseC = VoxelCoords.RegionBaseChunkCoord(result.RegionCoord);
-                int hs    = 1 << result.RegionCoord.y;
-                for (int cx = baseC.x; cx < baseC.x + hs; cx++)
-                for (int cz = baseC.z; cz < baseC.z + hs; cz++)
-                for (int cy = 0; cy < verticalChunks; cy++)
-                {
-                    var c = new Vector3Int(cx, cy, cz);
-                    if (_staleChunkMeshes.TryGetValue(c, out var sc))
-                    { Destroy(sc); _staleChunkMeshes.Remove(c); }
-                }
-                _flags.DrawListDirty = true;
-                anyAdded = true;
-            }
-            else
-            {
-                result.MeshData?.Discard();
-                result.TransMeshData?.Discard();
-            }
-            applied++;
-        }
-        return anyAdded;
-    }
-
     // ── Terrain settings ──────────────────────────────────────────────────────
 
     public TerrainSettings GetTerrainSettings() => new TerrainSettings
@@ -1341,7 +1235,6 @@ public class VoxelWorld : MonoBehaviour
     public bool TryGetChunk(Vector3Int coord, out VoxelChunk chunk) =>
         _chunks.TryGetValue(coord, out chunk);
 
-    public RegionData GetRegion(Vector3Int regionCoord) =>
-        _regions.TryGetValue(regionCoord, out var r) ? r : null;
+    public RegionData GetRegion(Vector3Int regionCoord) => _regionMgr.GetRegion(regionCoord);
 
 }

@@ -155,8 +155,3 @@ internal sealed class VoxelMeshRenderer
     }
 }
 
-// Stub — full implementation in Task 4 (RegionManager.cs)
-internal sealed class RegionManager
-{
-    public void EvictStaleRegionMeshes() { }
-}
