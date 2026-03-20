@@ -91,7 +91,7 @@ public static class ChunkDecorator
             foreach (var off in offsets)
             {
                 var targetWorld = new Vector3Int(worldX + off.pos.x, surfaceY + 1 + off.pos.y, worldZ + off.pos.z);
-                var targetCoord = WorldToChunkCoord(targetWorld);
+                var targetCoord = VoxelCoords.WorldToChunkCoord(targetWorld);
                 if (!chunks.TryGetValue(targetCoord, out var targetChunk)) continue;
                 var origin = targetCoord * 16;
                 targetChunk.SetBlock(targetWorld, origin, off.block);
@@ -146,11 +146,6 @@ public static class ChunkDecorator
         }
         return -1;
     }
-
-    static Vector3Int WorldToChunkCoord(Vector3Int world) => new(
-        world.x >= 0 ? world.x / 16 : (world.x - 15) / 16,
-        world.y >= 0 ? world.y / 16 : (world.y - 15) / 16,
-        world.z >= 0 ? world.z / 16 : (world.z - 15) / 16);
 
     // ── Biome determination (noise — main thread only) ────────────────────────
     // Note: uses Mathf.PerlinNoise; the Burst job uses noise.cnoise. Results may

@@ -8,6 +8,12 @@ public static class VoxelCoords
         return new Vector3Int(Mathf.FloorToInt(p.x / s), 0, Mathf.FloorToInt(p.z / s));
     }
 
+    public static Vector3Int WorldToChunkCoord(Vector3Int p)
+    {
+        int s = VoxelChunk.Size;
+        return new Vector3Int(Mathf.FloorToInt(p.x / (float)s), 0, Mathf.FloorToInt(p.z / (float)s));
+    }
+
     public static Vector3Int ChunkToRegionCoord(Vector3Int chunk, int lodLevel)
     {
         int size = 1 << lodLevel;
