@@ -121,7 +121,7 @@ internal sealed class RegionManager
                 _transRegionMeshes[result.RegionCoord] = MeshBuilder.CreateMesh(result.TransMeshData);
 
                 if (_staleRegionMeshes.TryGetValue(result.RegionCoord, out var stale))
-                { Object.Destroy(stale); _staleRegionMeshes.Remove(result.RegionCoord); }
+                { UnityEngine.Object.Destroy(stale); _staleRegionMeshes.Remove(result.RegionCoord); }
 
                 var baseC = VoxelCoords.RegionBaseChunkCoord(result.RegionCoord);
                 int hs    = 1 << result.RegionCoord.y;
@@ -131,7 +131,7 @@ internal sealed class RegionManager
                 {
                     var c = new Vector3Int(cx, cy, cz);
                     if (_staleChunkMeshes.TryGetValue(c, out var sc))
-                    { Object.Destroy(sc); _staleChunkMeshes.Remove(c); }
+                    { UnityEngine.Object.Destroy(sc); _staleChunkMeshes.Remove(c); }
                 }
                 _flags.DrawListDirty = true;
                 anyAdded = true;
@@ -189,7 +189,7 @@ internal sealed class RegionManager
             if (dist > outerRadius) _scratchStaleRegions.Add(r);
         }
         foreach (var r in _scratchStaleRegions)
-        { Object.Destroy(_staleRegionMeshes[r]); _staleRegionMeshes.Remove(r); _flags.DrawListDirty = true; }
+        { UnityEngine.Object.Destroy(_staleRegionMeshes[r]); _staleRegionMeshes.Remove(r); _flags.DrawListDirty = true; }
     }
 
     /// <summary>Dispose semaphore and CTS. Call after CompleteAndDisposeAll in OnDestroy.</summary>
