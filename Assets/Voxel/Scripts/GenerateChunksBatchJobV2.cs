@@ -44,13 +44,24 @@ public struct GenerateChunksBatchJobV2 : IJobParallelFor
         int  baseIdx  = i * VoxelCount;
 
         // ── Chunk-level early-exit ────────────────────────────────────────────
+        // Sample a 3×3 grid (corners + edge midpoints + center) to bound the surface
+        // height range. Four corners alone miss interior peaks (e.g. ridged-FBM mountain
+        // tips), causing chunks above the true peak to be incorrectly stamped all-air.
 
+        int half = Size / 2;
         int h00 = GetSurface(offsetX,        offsetZ,        s);
         int h10 = GetSurface(offsetX + Size, offsetZ,        s);
         int h01 = GetSurface(offsetX,        offsetZ + Size, s);
         int h11 = GetSurface(offsetX + Size, offsetZ + Size, s);
-        int minCorner = math.min(math.min(h00, h10), math.min(h01, h11));
-        int maxCorner = math.max(math.max(h00, h10), math.max(h01, h11));
+        int hC0 = GetSurface(offsetX + half, offsetZ,        s);
+        int hC1 = GetSurface(offsetX + half, offsetZ + Size, s);
+        int h0C = GetSurface(offsetX,        offsetZ + half, s);
+        int h1C = GetSurface(offsetX + Size, offsetZ + half, s);
+        int hCC = GetSurface(offsetX + half, offsetZ + half, s);
+        int minCorner = math.min(math.min(math.min(h00, h10), math.min(h01, h11)),
+                        math.min(math.min(hC0, hC1), math.min(h0C, math.min(h1C, hCC))));
+        int maxCorner = math.max(math.max(math.max(h00, h10), math.max(h01, h11)),
+                        math.max(math.max(hC0, hC1), math.max(h0C, math.max(h1C, hCC))));
 
         // Find max sub-surface depth across biomes for all-stone threshold
         int deepThreshold = 0;

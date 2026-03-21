@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(dir:*)",
-      "Bash(git ls-tree:*)"
+      "Bash(git ls-tree:*)",
+      "Bash(git -C \"g:/Private/Unity Projects/Voxel2\" diff ae87d22c36542c382ba1225479c996c9d9d8d24c 9631cec8d380d9dc30a45ee44bbb8102d3cbab0d -- HEAD)",
+      "Bash(git -C \"g:/Private/Unity Projects/Voxel2\" diff ae87d22c..9631cec8 -- \"Assets/Voxel/Scripts/WorldFlags.cs\" \"Assets/Voxel/Scripts/VoxelWorld.cs\")",
+      "Bash(git -C \"g:/Private/Unity Projects/Voxel2\" show ae87d22c:Assets/Voxel/Scripts/VoxelWorld.cs)"
     ]
   }
 }
