@@ -17,11 +17,13 @@ public class VoxelWorldEditor : Editor
         if (GUILayout.Button("Generate Material", GUILayout.Height(26)))
         {
             var (mat, transMat) = VoxelMaterialGenerator.Generate();
+            var vegMat          = VoxelMaterialGenerator.GenerateVegetationMaterial();
             if (mat != null)
             {
                 Undo.RecordObject(world, "Generate Voxel Material");
-                world.chunkMaterial       = mat;
-                world.transparentMaterial = transMat;
+                world.chunkMaterial        = mat;
+                world.transparentMaterial  = transMat;
+                world.vegetationMaterial   = vegMat;
                 EditorUtility.SetDirty(world);
             }
         }

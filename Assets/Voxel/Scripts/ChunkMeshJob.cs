@@ -47,6 +47,15 @@ public struct BuildChunkMeshJob : IJob
     public NativeList<float2> TransUV2s;
     public NativeList<int>    TransTriangles;
 
+    // ── Vegetation outputs (grass, flowers, twigs, … — LOD 0 only) ───────────
+    /// <summary>Chunk coordinate in the voxel grid. Used to compute world XZ for per-column hash.</summary>
+    public int3 ChunkCoord;
+    public NativeList<float3> VegVertices;
+    public NativeList<float3> VegNormals;
+    public NativeList<float2> VegUVs;
+    public NativeList<float2> VegUV2s;
+    public NativeList<int>    VegTriangles;
+
     // ── IJob ──────────────────────────────────────────────────────────────────
 
     public void Execute()
@@ -57,6 +66,7 @@ public struct BuildChunkMeshJob : IJob
         GreedyFace(1, 2, 0, new float3( 0,-1, 0), true,  3); // -Y
         GreedyFace(2, 0, 1, new float3( 0, 0, 1), false, 4); // +Z
         GreedyFace(2, 0, 1, new float3( 0, 0,-1), true,  5); // -Z
+        EmitVegetation();
     }
 
     // ── Greedy mesher ─────────────────────────────────────────────────────────
@@ -204,5 +214,139 @@ public struct BuildChunkMeshJob : IJob
             case 4: return N_PZ;
             default: return N_NZ;
         }
+    }
+
+    // ── Vegetation emission ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Scans each XZ column for the topmost surface voxel (solid block with air above)
+    /// and emits a 4-blade angled-splay tuft into the VegVertices/Normals/UVs/UV2s/Triangles lists.
+    ///
+    /// Only runs at LOD 0 (Step == 1). Higher LOD region meshes skip this pass.
+    ///
+    /// UV layout:  standard 0-1 quad mapping (texture sampled per blade face).
+    /// UV2 layout: x = decoration atlas tile index (0 = grass); y = sway weight [0 at root, 1 at tip].
+    ///             The VegetationLit shader reads UV2.y to drive wind displacement.
+    /// </summary>
+    private void EmitVegetation()
+    {
+        if (Step != 1) return;
+
+        for (int lz = 0; lz < Size; lz++)
+        for (int lx = 0; lx < Size; lx++)
+        {
+            int surfY = FindVegSurface(lx, lz);
+            if (surfY < 0) continue;
+
+            int  worldX = ChunkCoord.x * Size + lx;
+            int  worldZ = ChunkCoord.z * Size + lz;
+            uint h      = VegHash(worldX, worldZ);
+
+            // Tuft centre: slight random XZ offset so adjacent tufts don't grid-align.
+            float cx = lx + 0.5f + ((h        & 0xFF) / 255f - 0.5f) * 0.3f;
+            float cz = lz + 0.5f + ((h >>  8  & 0xFF) / 255f - 0.5f) * 0.3f;
+            float cy = surfY + 1f; // top face of the surface voxel
+
+            // Height scale: [0.75, 1.0], rotation: [0°, 45°]
+            float hs  = 0.75f + (h >> 16 & 0xFF) / 255f * 0.25f;
+            float rot = (h >> 24 & 0xFF) / 255f * math.PI * 0.25f;
+
+            math.sincos(rot, out float sr, out float cr);
+
+            // Blade geometry constants
+            float leanOut = 0.38f;        // horizontal reach of blade tip from centre
+            float leanUp  = 0.75f * hs;  // vertical reach of blade tip
+            float halfW   = 0.25f;        // half-width of each blade
+
+            // 4 blades at 0°/90°/180°/270° in XZ, all rotated by `rot`.
+            // leanX/leanZ give the direction each blade leans; widthX/widthZ are perpendicular.
+            EmitBlade(cx, cy, cz,  cr * leanOut,  sr * leanOut, leanUp, -sr, cr, halfW);
+            EmitBlade(cx, cy, cz, -sr * leanOut,  cr * leanOut, leanUp, -cr,-sr, halfW);
+            EmitBlade(cx, cy, cz, -cr * leanOut, -sr * leanOut, leanUp,  sr,-cr, halfW);
+            EmitBlade(cx, cy, cz,  sr * leanOut, -cr * leanOut, leanUp,  cr, sr, halfW);
+        }
+    }
+
+    /// <summary>
+    /// Returns the local Y of the topmost solid block whose block-above is air.
+    /// "Solid" = any non-air block (water, leaves, stone, grass, etc. all qualify).
+    /// Returns -1 if no surface found in this column.
+    /// </summary>
+    private int FindVegSurface(int lx, int lz)
+    {
+        for (int ly = Size - 1; ly >= 0; ly--)
+        {
+            byte b = Voxels[lx + ly * Size + lz * Size * Size];
+            if (b == BlockType.Air) continue;
+
+            byte above;
+            if (ly < Size - 1)
+                above = Voxels[lx + (ly + 1) * Size + lz * Size * Size];
+            else
+                above = N_PY[lx + 0 * Size + lz * Size * Size]; // top of chunk → check +Y neighbour
+
+            if (above == BlockType.Air) return ly;
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// Emits one quad (4 verts, 2 tris) into the vegetation lists.
+    ///
+    ///   root left  v0 ──── v1  root right   (UV y = 0, UV2.y = 0: no sway)
+    ///              │        │
+    ///   tip  left  v3 ──── v2  tip  right   (UV y = 1, UV2.y = 1: full sway)
+    ///
+    /// The shader is two-sided (Cull Off), so only one winding order is needed.
+    ///
+    /// Parameters:
+    ///   cx/cy/cz        — tuft base (centre of top face of surface voxel)
+    ///   dx/dz           — horizontal lean of the blade tip (XZ offset from base)
+    ///   dy              — vertical rise of the blade tip
+    ///   wx/wz           — half-width direction vector (perpendicular to lean, unit length)
+    ///   halfW           — half-width scalar
+    /// </summary>
+    private void EmitBlade(float cx, float cy, float cz,
+                            float dx, float dz, float dy,
+                            float wx, float wz, float halfW)
+    {
+        int   idx  = VegVertices.Length;
+        float3 up  = new float3(0, 1, 0);
+
+        // Root: two verts side-by-side at the base of the blade
+        VegVertices.Add(new float3(cx - wx * halfW, cy,      cz - wz * halfW));
+        VegVertices.Add(new float3(cx + wx * halfW, cy,      cz + wz * halfW));
+        // Tip: two verts shifted by the lean vector
+        VegVertices.Add(new float3(cx + wx * halfW + dx, cy + dy, cz + wz * halfW + dz));
+        VegVertices.Add(new float3(cx - wx * halfW + dx, cy + dy, cz - wz * halfW + dz));
+
+        VegNormals.Add(up); VegNormals.Add(up); VegNormals.Add(up); VegNormals.Add(up);
+
+        // UV: standard 0→1 quad (sampled from grass texture)
+        VegUVs.Add(new float2(0, 0)); VegUVs.Add(new float2(1, 0));
+        VegUVs.Add(new float2(1, 1)); VegUVs.Add(new float2(0, 1));
+
+        // UV2: x = atlas tile index (0 = grass), y = sway weight
+        float2 rootUV2 = new float2(0, 0); // root: no sway
+        float2 tipUV2  = new float2(0, 1); // tip: full sway
+        VegUV2s.Add(rootUV2); VegUV2s.Add(rootUV2);
+        VegUV2s.Add(tipUV2);  VegUV2s.Add(tipUV2);
+
+        // Two triangles, counter-clockwise front face (shader is two-sided)
+        VegTriangles.Add(idx);     VegTriangles.Add(idx + 1); VegTriangles.Add(idx + 2);
+        VegTriangles.Add(idx);     VegTriangles.Add(idx + 2); VegTriangles.Add(idx + 3);
+    }
+
+    /// <summary>
+    /// Deterministic per-column hash. Drives tuft offset, height, and rotation variation.
+    /// Identical to ChunkDecorator.Hash — keep them in sync.
+    /// </summary>
+    private static uint VegHash(int x, int z)
+    {
+        uint h = (uint)(x * 374761393 + z * 668265263);
+        h ^= h >> 13;
+        h *= 1274126177u;
+        h ^= h >> 16;
+        return h;
     }
 }

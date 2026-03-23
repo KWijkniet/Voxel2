@@ -66,6 +66,9 @@ public class VoxelWorld : MonoBehaviour
     [Header("Rendering")]
     public Material chunkMaterial;
     public Material transparentMaterial;
+    [Tooltip("Material for grass, flowers, and other billboard vegetation. " +
+             "Use Assets/Voxel/Generated/VegetationPlaceholder.mat (create via Generate Material button).")]
+    public Material vegetationMaterial;
 
     [Header("Performance")]
     [Tooltip("Max LOD 0 chunk pipelines (terrain+mesh jobs) in flight at once. " +
@@ -143,6 +146,7 @@ public class VoxelWorld : MonoBehaviour
     private readonly Dictionary<Vector3Int, VoxelChunk> _chunks      = new();
     private readonly Dictionary<Vector3Int, Mesh>        _chunkMeshes      = new();
     private readonly Dictionary<Vector3Int, Mesh>        _transChunkMeshes = new();
+    private readonly Dictionary<Vector3Int, Mesh>        _vegChunkMeshes   = new();
     private readonly WorldFlags _flags = new WorldFlags { DrawListDirty = true };
     private VoxelMeshRenderer _renderer;
     private readonly HashSet<Vector3Int>                  _desiredCoords  = new();
@@ -191,7 +195,7 @@ public class VoxelWorld : MonoBehaviour
     {
         _renderer = new VoxelMeshRenderer(
             this,
-            _chunkMeshes, _transChunkMeshes,
+            _chunkMeshes, _transChunkMeshes, _vegChunkMeshes,
             _regionMeshes, _transRegionMeshes,
             _staleChunkMeshes, _staleRegionMeshes,
             _flags);
@@ -214,7 +218,7 @@ public class VoxelWorld : MonoBehaviour
             this,
             _v2CSpline, _v2ESpline, _v2Biomes, _v2TreeConfigs,
             _chunks, _chunkMeshes, _transChunkMeshes,
-            _staleChunkMeshes, _staleRegionMeshes,
+            _staleChunkMeshes, _staleRegionMeshes, _vegChunkMeshes,
             _inFlight, _desiredCoords, _pendingCoords,
             _flags,
             onChunkReady: _regionMgr.TryFeedChunkIntoRegion);
@@ -273,8 +277,10 @@ public class VoxelWorld : MonoBehaviour
         foreach (var kvp in _staleRegionMeshes) if (kvp.Value != null) Destroy(kvp.Value);
         foreach (var kvp in _transChunkMeshes)  if (kvp.Value != null) Destroy(kvp.Value);
         foreach (var kvp in _transRegionMeshes) if (kvp.Value != null) Destroy(kvp.Value);
+        foreach (var kvp in _vegChunkMeshes)    if (kvp.Value != null) Destroy(kvp.Value);
         _staleChunkMeshes.Clear();  _staleRegionMeshes.Clear();
         _transChunkMeshes.Clear();  _transRegionMeshes.Clear();
+        _vegChunkMeshes.Clear();
 
         if (_v2CSpline.IsCreated) _v2CSpline.Dispose();
         if (_v2ESpline.IsCreated) _v2ESpline.Dispose();

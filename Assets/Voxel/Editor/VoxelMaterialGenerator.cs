@@ -20,8 +20,10 @@ public static class VoxelMaterialGenerator
     private const string TextureArrPath     = OutputFolder + "/VoxelTexArray.asset";
     private const string MaterialPath       = OutputFolder + "/VoxelTerrain.mat";
     private const string TransMaterialPath  = OutputFolder + "/VoxelTransparent.mat";
+    private const string VegMaterialPath    = OutputFolder + "/VegetationPlaceholder.mat";
     private const string ShaderPath         = "Voxel/VoxelTerrain";
     private const string TransShaderPath    = "Voxel/VoxelTransparent";
+    private const string VegShaderPath      = "Voxel/VegetationLit";
     private const string TextureFolder  = "Assets/Voxel/Textures";
     private const int    TileSize       = 16;
 
@@ -65,6 +67,51 @@ public static class VoxelMaterialGenerator
                   $"                         Transparent mat→ {TransMaterialPath}");
         return (AssetDatabase.LoadAssetAtPath<Material>(MaterialPath),
                 AssetDatabase.LoadAssetAtPath<Material>(TransMaterialPath));
+    }
+
+    /// <summary>
+    /// Creates (or recreates) the vegetation placeholder material in Generated/.
+    /// Safe to call independently of Generate().
+    /// </summary>
+    public static Material GenerateVegetationMaterial()
+    {
+        EnsureFolder();
+
+        var shader = Shader.Find(VegShaderPath);
+        if (shader == null)
+        {
+            Debug.LogError($"[VoxelMaterialGenerator] Shader '{VegShaderPath}' not found. " +
+                           "Make sure Assets/Voxel/Shaders/VegetationLit.shader exists.");
+            return null;
+        }
+
+        var mat = new Material(shader)
+        {
+            name         = "VegetationPlaceholder",
+            color        = new Color(0.45f, 0.85f, 0.30f, 1f),
+            renderQueue  = (int)UnityEngine.Rendering.RenderQueue.AlphaTest,
+        };
+        mat.SetFloat("_Cutoff",        0.35f);
+        mat.SetFloat("_WindSpeed",     1.5f);
+        mat.SetFloat("_WindStrength",  0.10f);
+        mat.SetFloat("_WindFrequency", 0.9f);
+        mat.SetFloat("_AmbientMin",    0.35f);
+
+        // Overwrite any existing asset so re-running is safe.
+        var existing = AssetDatabase.LoadAssetAtPath<Material>(VegMaterialPath);
+        if (existing != null)
+        {
+            EditorUtility.CopySerialized(mat, existing);
+            AssetDatabase.SaveAssets();
+            Debug.Log($"[VoxelMaterialGenerator] Updated {VegMaterialPath}");
+            return existing;
+        }
+
+        AssetDatabase.CreateAsset(mat, VegMaterialPath);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+        Debug.Log($"[VoxelMaterialGenerator] Created {VegMaterialPath}");
+        return AssetDatabase.LoadAssetAtPath<Material>(VegMaterialPath);
     }
 
     // ── Texture array ─────────────────────────────────────────────────────────

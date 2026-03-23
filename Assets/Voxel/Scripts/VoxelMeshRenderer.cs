@@ -11,6 +11,7 @@ internal sealed class VoxelMeshRenderer
     private readonly VoxelWorld _world;
     private readonly Dictionary<Vector3Int, Mesh> _chunkMeshes;
     private readonly Dictionary<Vector3Int, Mesh> _transChunkMeshes;
+    private readonly Dictionary<Vector3Int, Mesh> _vegChunkMeshes;
     private readonly Dictionary<Vector3Int, Mesh> _regionMeshes;
     private readonly Dictionary<Vector3Int, Mesh> _transRegionMeshes;
     private readonly Dictionary<Vector3Int, Mesh> _staleChunkMeshes;
@@ -20,6 +21,7 @@ internal sealed class VoxelMeshRenderer
 
     private readonly List<(Mesh mesh, Matrix4x4 trs)> _chunkDrawList       = new();
     private readonly List<(Mesh mesh, Matrix4x4 trs)> _transChunkDrawList  = new();
+    private readonly List<(Mesh mesh, Matrix4x4 trs)> _vegDrawList         = new();
     private readonly List<(Mesh mesh, Matrix4x4 trs)> _regionDrawList      = new();
     private readonly List<(Mesh mesh, Matrix4x4 trs)> _transRegionDrawList = new();
     private Matrix4x4 _cachedL2W = Matrix4x4.zero;
@@ -31,6 +33,7 @@ internal sealed class VoxelMeshRenderer
         VoxelWorld world,
         Dictionary<Vector3Int, Mesh> chunkMeshes,
         Dictionary<Vector3Int, Mesh> transChunkMeshes,
+        Dictionary<Vector3Int, Mesh> vegChunkMeshes,
         Dictionary<Vector3Int, Mesh> regionMeshes,
         Dictionary<Vector3Int, Mesh> transRegionMeshes,
         Dictionary<Vector3Int, Mesh> staleChunkMeshes,
@@ -40,6 +43,7 @@ internal sealed class VoxelMeshRenderer
         _world             = world;
         _chunkMeshes       = chunkMeshes;
         _transChunkMeshes  = transChunkMeshes;
+        _vegChunkMeshes    = vegChunkMeshes;
         _regionMeshes      = regionMeshes;
         _transRegionMeshes = transRegionMeshes;
         _staleChunkMeshes  = staleChunkMeshes;
@@ -81,6 +85,11 @@ internal sealed class VoxelMeshRenderer
                 if (kvp.Value != null)
                     _transChunkDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(VoxelCoords.ChunkToWorldPos(kvp.Key))));
 
+            _vegDrawList.Clear();
+            foreach (var kvp in _vegChunkMeshes)
+                if (kvp.Value != null)
+                    _vegDrawList.Add((kvp.Value, localToWorld * Matrix4x4.Translate(VoxelCoords.ChunkToWorldPos(kvp.Key))));
+
             _transRegionDrawList.Clear();
             foreach (var kvp in _transRegionMeshes)
                 if (kvp.Value != null)
@@ -88,6 +97,7 @@ internal sealed class VoxelMeshRenderer
         }
 
         var transMat = _world.transparentMaterial != null ? _world.transparentMaterial : _world.chunkMaterial;
+        var vegMat   = _world.vegetationMaterial;
         int layer = _world.gameObject.layer;
         foreach (var (mesh, trs) in _chunkDrawList)
             Graphics.DrawMesh(mesh, trs, _world.chunkMaterial, layer);
@@ -97,6 +107,9 @@ internal sealed class VoxelMeshRenderer
             Graphics.DrawMesh(mesh, trs, transMat, layer);
         foreach (var (mesh, trs) in _transRegionDrawList)
             Graphics.DrawMesh(mesh, trs, transMat, layer);
+        if (vegMat != null)
+            foreach (var (mesh, trs) in _vegDrawList)
+                Graphics.DrawMesh(mesh, trs, vegMat, layer);
     }
 
     public void UnloadChunkMesh(Vector3Int coord)
@@ -111,6 +124,12 @@ internal sealed class VoxelMeshRenderer
         {
             _transChunkMeshes.Remove(coord);
             if (tmesh != null) Object.Destroy(tmesh);
+            _flags.DrawListDirty = true;
+        }
+        if (_vegChunkMeshes.TryGetValue(coord, out var vmesh))
+        {
+            _vegChunkMeshes.Remove(coord);
+            if (vmesh != null) Object.Destroy(vmesh);
             _flags.DrawListDirty = true;
         }
     }

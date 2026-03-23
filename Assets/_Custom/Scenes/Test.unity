@@ -322,8 +322,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 70aa573b684399741ab0811235d6e0ba, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VoxelWorld
-  viewDistance: 12
-  verticalChunks: 12
+  viewDistance: 16
+  verticalChunks: 16
   player: {fileID: 1120276404}
   seaLevel: 15
   baseHeight: 5
@@ -350,6 +350,7 @@ MonoBehaviour:
   tundraFrozenDepth: 3
   chunkMaterial: {fileID: 2100000, guid: 915577a1428a176489884433fbc104de, type: 2}
   transparentMaterial: {fileID: 2100000, guid: fa3e29056337cac488678e43f3d29113, type: 2}
+  vegetationMaterial: {fileID: 2100000, guid: 139ede8c94f72a04f821fab80b0da031, type: 2}
   maxPipelinesInFlight: 24
   maxApplyPerFrame: 12
   maxRequestsPerUpdate: 16
@@ -535,22 +536,6 @@ MonoBehaviour:
     DeepBlock: 1
     SnowAltitude: 75
   v2TreeConfigs:
-  - Species: 0
-    Density: 0
-    MinAltitude: 0
-    MaxAltitude: 0
-  - Species: 0
-    Density: 0
-    MinAltitude: 0
-    MaxAltitude: 0
-  - Species: 0
-    Density: 0
-    MinAltitude: 0
-    MaxAltitude: 0
-  - Species: 0
-    Density: 0
-    MinAltitude: 0
-    MaxAltitude: 0
   - Species: 1
     Density: 0.01
     MinAltitude: 21

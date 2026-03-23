@@ -40,7 +40,7 @@ public static class ChunkDecorator
         // (AllNeighboursReady), so tree crowns extending up to ~9 blocks in XZ are safe.
         // The chunk above is also guaranteed loaded (checked in TryDecorateReady),
         // so trees extending upward don't get cut off.
-        PlaceTreesForChunk(coord, chunks, treeConfigs, biomes, settings, verticalChunks);
+        //PlaceTreesForChunk(coord, chunks, treeConfigs, biomes, settings, verticalChunks);
     }
 
     static void PlaceTreesForChunk(

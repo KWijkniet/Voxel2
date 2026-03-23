@@ -18,6 +18,7 @@ internal sealed class ChunkPipelineProcessor
     private readonly Dictionary<Vector3Int, Mesh> _transChunkMeshes;
     private readonly Dictionary<Vector3Int, Mesh> _staleChunkMeshes;
     private readonly Dictionary<Vector3Int, Mesh> _staleRegionMeshes;
+    private readonly Dictionary<Vector3Int, Mesh> _vegChunkMeshes;
     private readonly HashSet<Vector3Int> _inFlight;
     private readonly HashSet<Vector3Int> _desiredCoords;
     private readonly HashSet<Vector3Int> _pendingCoords;
@@ -107,6 +108,12 @@ internal sealed class ChunkPipelineProcessor
         public NativeList<float2>  TransUVs;
         public NativeList<float2>  TransUV2s;
         public NativeList<int>     TransTris;
+        // Vegetation geometry (grass, flowers, twigs, … — LOD 0 only)
+        public NativeList<float3>  VegVerts;
+        public NativeList<float3>  VegNorms;
+        public NativeList<float2>  VegUVs;
+        public NativeList<float2>  VegUV2s;
+        public NativeList<int>     VegTris;
 
         public bool BuildMesh;
         public bool Discarded;
@@ -123,6 +130,7 @@ internal sealed class ChunkPipelineProcessor
         Dictionary<Vector3Int, Mesh> transChunkMeshes,
         Dictionary<Vector3Int, Mesh> staleChunkMeshes,
         Dictionary<Vector3Int, Mesh> staleRegionMeshes,
+        Dictionary<Vector3Int, Mesh> vegChunkMeshes,
         HashSet<Vector3Int> inFlight,
         HashSet<Vector3Int> desiredCoords,
         HashSet<Vector3Int> pendingCoords,
@@ -139,6 +147,7 @@ internal sealed class ChunkPipelineProcessor
         _transChunkMeshes  = transChunkMeshes;
         _staleChunkMeshes  = staleChunkMeshes;
         _staleRegionMeshes = staleRegionMeshes;
+        _vegChunkMeshes    = vegChunkMeshes;
         _inFlight          = inFlight;
         _desiredCoords     = desiredCoords;
         _pendingCoords     = pendingCoords;
@@ -251,6 +260,11 @@ internal sealed class ChunkPipelineProcessor
             var tUvs       = new NativeList<float2>(512,  Allocator.Persistent);
             var tUv2s      = new NativeList<float2>(512,  Allocator.Persistent);
             var tTris      = new NativeList<int>   (768,  Allocator.Persistent);
+            var vegVerts   = new NativeList<float3>(1024, Allocator.Persistent);
+            var vegNorms   = new NativeList<float3>(1024, Allocator.Persistent);
+            var vegUVs     = new NativeList<float2>(1024, Allocator.Persistent);
+            var vegUV2s    = new NativeList<float2>(1024, Allocator.Persistent);
+            var vegTris    = new NativeList<int>   (1536, Allocator.Persistent);
 
             var meshJob = new BuildChunkMeshJob
             {
@@ -270,6 +284,12 @@ internal sealed class ChunkPipelineProcessor
                 TransUVs       = tUvs,
                 TransUV2s      = tUv2s,
                 TransTriangles = tTris,
+                ChunkCoord     = batch.Coords[i],
+                VegVertices    = vegVerts,
+                VegNormals     = vegNorms,
+                VegUVs         = vegUVs,
+                VegUV2s        = vegUV2s,
+                VegTriangles   = vegTris,
             };
             var meshHandle = meshJob.Schedule(terrainHandle);
 
@@ -290,6 +310,11 @@ internal sealed class ChunkPipelineProcessor
                 TransUVs           = tUvs,
                 TransUV2s          = tUv2s,
                 TransTris          = tTris,
+                VegVerts           = vegVerts,
+                VegNorms           = vegNorms,
+                VegUVs             = vegUVs,
+                VegUV2s            = vegUV2s,
+                VegTris            = vegTris,
                 BuildMesh          = true,
             });
         }
@@ -392,7 +417,13 @@ internal sealed class ChunkPipelineProcessor
             if (p.BuildMesh && _desiredCoords.Contains(p.Coord) && !_chunkMeshes.ContainsKey(p.Coord))
             {
                 _chunkMeshes[p.Coord]      = CreateMeshFromLists(ref p, transparent: false);
+                // Veg mesh must be created before CreateMeshFromLists(transparent:true),
+                // because that call invokes DisposeMeshLists which now also disposes veg lists.
+                if (_vegChunkMeshes.TryGetValue(p.Coord, out var oldVeg))
+                { UnityEngine.Object.Destroy(oldVeg); _vegChunkMeshes.Remove(p.Coord); }
+                var vegMesh = CreateVegMesh(ref p);
                 _transChunkMeshes[p.Coord] = CreateMeshFromLists(ref p, transparent: true);
+                if (vegMesh != null) _vegChunkMeshes[p.Coord] = vegMesh;
                 // Remove same-coord stale chunk
                 if (_staleChunkMeshes.TryGetValue(p.Coord, out var stale))
                 { UnityEngine.Object.Destroy(stale); _staleChunkMeshes.Remove(p.Coord); }
@@ -472,6 +503,54 @@ internal sealed class ChunkPipelineProcessor
         return mesh;
     }
 
+    /// <summary>
+    /// Builds a vegetation Mesh from the VegVerts/Norms/UVs/UV2s/Tris NativeLists, then
+    /// disposes all five lists. Returns null (and still disposes) if the lists are empty.
+    /// </summary>
+    private static Mesh CreateVegMesh(ref ChunkPipeline p)
+    {
+        Mesh mesh = null;
+        if (p.VegVerts.IsCreated && p.VegVerts.Length > 0)
+        {
+            bool use32 = p.VegVerts.Length > ushort.MaxValue;
+            var  mda   = Mesh.AllocateWritableMeshData(1);
+            var  md    = mda[0];
+
+            md.SetVertexBufferParams(p.VegVerts.Length,
+                new VertexAttributeDescriptor(VertexAttribute.Position,  VertexAttributeFormat.Float32, 3, stream: 0),
+                new VertexAttributeDescriptor(VertexAttribute.Normal,    VertexAttributeFormat.Float32, 3, stream: 1),
+                new VertexAttributeDescriptor(VertexAttribute.TexCoord0, VertexAttributeFormat.Float32, 2, stream: 2),
+                new VertexAttributeDescriptor(VertexAttribute.TexCoord1, VertexAttributeFormat.Float32, 2, stream: 3));
+            md.SetIndexBufferParams(p.VegTris.Length, use32 ? IndexFormat.UInt32 : IndexFormat.UInt16);
+
+            md.GetVertexData<float3>(0).CopyFrom(p.VegVerts.AsArray());
+            md.GetVertexData<float3>(1).CopyFrom(p.VegNorms.AsArray());
+            md.GetVertexData<float2>(2).CopyFrom(p.VegUVs.AsArray());
+            md.GetVertexData<float2>(3).CopyFrom(p.VegUV2s.AsArray());
+
+            if (use32) { md.GetIndexData<int>().CopyFrom(p.VegTris.AsArray()); }
+            else { var idx = md.GetIndexData<ushort>(); for (int i = 0; i < p.VegTris.Length; i++) idx[i] = (ushort)p.VegTris[i]; }
+
+            md.subMeshCount = 1;
+            md.SetSubMesh(0, new SubMeshDescriptor(0, p.VegTris.Length),
+                MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+
+            mesh = new Mesh { name = "ChunkVeg" };
+            Mesh.ApplyAndDisposeWritableMeshData(mda, mesh,
+                MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+            int s = VoxelChunk.Size;
+            // Slightly taller bounds to encompass blade tips above the chunk top face.
+            mesh.bounds = new Bounds(new Vector3(s * .5f, s * .5f, s * .5f), new Vector3(s, s + 1f, s));
+        }
+
+        if (p.VegVerts.IsCreated)  p.VegVerts.Dispose();
+        if (p.VegNorms.IsCreated)  p.VegNorms.Dispose();
+        if (p.VegUVs.IsCreated)    p.VegUVs.Dispose();
+        if (p.VegUV2s.IsCreated)   p.VegUV2s.Dispose();
+        if (p.VegTris.IsCreated)   p.VegTris.Dispose();
+        return mesh;
+    }
+
     private static void DisposeMeshLists(ref ChunkPipeline p)
     {
         if (!p.BuildMesh) return;
@@ -485,6 +564,11 @@ internal sealed class ChunkPipelineProcessor
         if (p.TransUVs.IsCreated)   p.TransUVs.Dispose();
         if (p.TransUV2s.IsCreated)  p.TransUV2s.Dispose();
         if (p.TransTris.IsCreated)  p.TransTris.Dispose();
+        if (p.VegVerts.IsCreated)   p.VegVerts.Dispose();
+        if (p.VegNorms.IsCreated)   p.VegNorms.Dispose();
+        if (p.VegUVs.IsCreated)     p.VegUVs.Dispose();
+        if (p.VegUV2s.IsCreated)    p.VegUV2s.Dispose();
+        if (p.VegTris.IsCreated)    p.VegTris.Dispose();
     }
 
     // ── V2 decoration pipeline ────────────────────────────────────────────────
@@ -537,17 +621,23 @@ internal sealed class ChunkPipelineProcessor
                                                NativeArrayOptions.UninitializedMemory);
         NativeArray<byte>.Copy(chunk.Blocks, voxelsCopy, VoxelChunk.VoxelCount);
 
-        var verts  = new NativeList<float3>(4096, Allocator.Persistent);
-        var norms  = new NativeList<float3>(4096, Allocator.Persistent);
-        var uvs    = new NativeList<float2>(4096, Allocator.Persistent);
-        var uv2s   = new NativeList<float2>(4096, Allocator.Persistent);
-        var tris   = new NativeList<int>   (6144, Allocator.Persistent);
-        var tVerts = new NativeList<float3>(512,  Allocator.Persistent);
-        var tNorms = new NativeList<float3>(512,  Allocator.Persistent);
-        var tUvs   = new NativeList<float2>(512,  Allocator.Persistent);
-        var tUv2s  = new NativeList<float2>(512,  Allocator.Persistent);
-        var tTris  = new NativeList<int>   (768,  Allocator.Persistent);
+        var verts    = new NativeList<float3>(4096, Allocator.Persistent);
+        var norms    = new NativeList<float3>(4096, Allocator.Persistent);
+        var uvs      = new NativeList<float2>(4096, Allocator.Persistent);
+        var uv2s     = new NativeList<float2>(4096, Allocator.Persistent);
+        var tris     = new NativeList<int>   (6144, Allocator.Persistent);
+        var tVerts   = new NativeList<float3>(512,  Allocator.Persistent);
+        var tNorms   = new NativeList<float3>(512,  Allocator.Persistent);
+        var tUvs     = new NativeList<float2>(512,  Allocator.Persistent);
+        var tUv2s    = new NativeList<float2>(512,  Allocator.Persistent);
+        var tTris    = new NativeList<int>   (768,  Allocator.Persistent);
+        var vegVerts = new NativeList<float3>(1024, Allocator.Persistent);
+        var vegNorms = new NativeList<float3>(1024, Allocator.Persistent);
+        var vegUVs   = new NativeList<float2>(1024, Allocator.Persistent);
+        var vegUV2s  = new NativeList<float2>(1024, Allocator.Persistent);
+        var vegTris  = new NativeList<int>   (1536, Allocator.Persistent);
 
+        var chunkCoord = new Unity.Mathematics.int3(coord.x, coord.y, coord.z);
         var meshJob = new BuildChunkMeshJob
         {
             Voxels         = voxelsCopy,
@@ -566,6 +656,12 @@ internal sealed class ChunkPipelineProcessor
             TransUVs       = tUvs,
             TransUV2s      = tUv2s,
             TransTriangles = tTris,
+            ChunkCoord     = chunkCoord,
+            VegVertices    = vegVerts,
+            VegNormals     = vegNorms,
+            VegUVs         = vegUVs,
+            VegUV2s        = vegUV2s,
+            VegTriangles   = vegTris,
         };
 
         _pipelines.Add(new ChunkPipeline
@@ -585,6 +681,11 @@ internal sealed class ChunkPipelineProcessor
             TransUVs           = tUvs,
             TransUV2s          = tUv2s,
             TransTris          = tTris,
+            VegVerts           = vegVerts,
+            VegNorms           = vegNorms,
+            VegUVs             = vegUVs,
+            VegUV2s            = vegUV2s,
+            VegTris            = vegTris,
         });
         // Batch is null — ProcessCompletedPipelines disposes voxelsCopy via p.Voxels.Dispose()
         // when the pipeline completes (existing code handles null Batch).
